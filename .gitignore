@@ -1,1 +1,8 @@
-data/raw/**
+data/raw/
+data/processed/
+__pycache__/
+.venv/
+*.pyc
+.claude
+.DS_Store
+CLAUDE.md
