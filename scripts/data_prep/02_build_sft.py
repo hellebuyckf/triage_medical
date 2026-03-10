@@ -1,7 +1,12 @@
 """Script 02 — Construction du dataset SFT unifié (~5 000 paires instruction/response)."""
 
 import argparse
+import sys
 from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pandas as pd
 from datasets import load_from_disk
@@ -15,7 +20,7 @@ from utils import (
     md5_hash,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = _SCRIPTS_DIR.parent
 RAW_DIR = PROJECT_ROOT / "data" / "raw"
 OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "sft_raw.parquet"
 

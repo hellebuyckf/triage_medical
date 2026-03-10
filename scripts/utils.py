@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import re
+from pathlib import Path
 
 # ── Schémas de données ───────────────────────────────────────────────────────
 
@@ -94,6 +95,93 @@ def md5_hash(text: str) -> str:
     """Hash MD5 pour détection de doublons sur instruction."""
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
+
+# ── Prompt formatting (S2 — SFT) ─────────────────────────────────────────────
+
+SYSTEM_PROMPT = """Tu es un agent de triage médical pour le Centre Hospitalier Saint-Aurélien.
+Analyse les symptômes décrits et fournis :
+1. Le niveau d'urgence : URGENCE MAXIMALE / URGENCE MODÉRÉE / URGENCE DIFFÉRÉE
+2. Une évaluation clinique brève
+3. Des recommandations concrètes
+
+⚠️ Cet agent est un outil d'aide au triage, pas un diagnostic médical."""
+
+
+def format_chat_prompt(instruction: str, response: str = "") -> str:
+    """Formate un exemple SFT au format ChatML Qwen3.
+
+    Args:
+        instruction: Le texte de la question/instruction utilisateur.
+        response: La réponse attendue. Si vide, génère un prompt d'inférence
+            (sans le tour assistant), utilisé pour la génération.
+
+    Returns:
+        Le prompt formaté au format ChatML complet ou partiel.
+    """
+    prompt = (
+        f"<|im_start|>system\n{SYSTEM_PROMPT}\n<|im_end|>\n"
+        f"<|im_start|>user\n{instruction}\n<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
+    if response:
+        prompt += f"{response}<|im_end|>"
+    return prompt
+
+
+# ── Urgency extraction (S2 — évaluation) ─────────────────────────────────────
+
+_URGENCY_PATTERNS: dict[str, re.Pattern] = {
+    "max": re.compile(r"MAXIMALE|maximale|urgence\s+max\b", re.IGNORECASE),
+    "moderate": re.compile(r"MOD[ÉE]R[ÉE]E|mod[eé]r[eé]e|urgence\s+mod", re.IGNORECASE),
+    "deferred": re.compile(r"DIFF[ÉE]R[ÉE]E|diff[eé]r[eé]e|deferred", re.IGNORECASE),
+}
+
+
+def extract_urgency_from_response(text: str) -> str | None:
+    """Extrait le niveau d'urgence depuis une réponse générée par le modèle.
+
+    Cherche les patterns :
+    - "URGENCE MAXIMALE" / "maximale" / "urgence max" → "max"
+    - "URGENCE MODÉRÉE" / "modérée" / "urgence mod" → "moderate"
+    - "URGENCE DIFFÉRÉE" / "différée" / "deferred" → "deferred"
+
+    Args:
+        text: Le texte de la réponse générée.
+
+    Returns:
+        "max", "moderate", "deferred", ou None si non trouvé.
+    """
+    for level, pattern in _URGENCY_PATTERNS.items():
+        if pattern.search(text):
+            return level
+    return None
+
+
+# ── Checkpoint helpers (S2 — entraînement) ───────────────────────────────────
+
+
+def get_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
+    """Retourne le chemin du dernier checkpoint dans checkpoint_dir.
+
+    Cherche les dossiers nommés "checkpoint-<step>" et retourne
+    celui avec le numéro de step le plus élevé.
+
+    Args:
+        checkpoint_dir: Répertoire contenant les checkpoints.
+
+    Returns:
+        Path vers le dernier checkpoint, ou None si aucun trouvé.
+    """
+    if not checkpoint_dir.exists():
+        return None
+    checkpoints = sorted(
+        [d for d in checkpoint_dir.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")],
+        key=lambda p: int(p.name.split("-")[-1]),
+    )
+    return checkpoints[-1] if checkpoints else None
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
 
 def get_logger(name: str, verbose: bool = False) -> logging.Logger:
     """Logger formaté avec timestamp et nom du script."""

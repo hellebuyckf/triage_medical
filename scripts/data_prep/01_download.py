@@ -2,13 +2,18 @@
 
 import argparse
 import random
+import sys
 from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from datasets import DatasetDict, load_dataset, load_from_disk
 
 from utils import get_logger
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = _SCRIPTS_DIR.parent
 
 DATASETS_CONFIG = {
     "frenchmedmcqa": {

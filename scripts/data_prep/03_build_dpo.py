@@ -1,7 +1,12 @@
 """Script 03 — Construction du dataset DPO (~1 000 paires prompt/chosen/rejected)."""
 
 import argparse
+import sys
 from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_from_disk
@@ -9,7 +14,7 @@ from tqdm import tqdm
 
 from utils import DPO_COLUMNS, get_logger
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = _SCRIPTS_DIR.parent
 RAW_DIR = PROJECT_ROOT / "data" / "raw" / "ultramedical_preference"
 OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "dpo_raw.parquet"
 

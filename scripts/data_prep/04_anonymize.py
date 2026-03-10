@@ -2,8 +2,13 @@
 
 import argparse
 import random
+import sys
 from datetime import datetime
 from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pandas as pd
 from presidio_analyzer import AnalyzerEngine
@@ -13,7 +18,7 @@ from tqdm import tqdm
 
 from utils import get_logger
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = _SCRIPTS_DIR.parent
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 SFT_INPUT = PROCESSED_DIR / "sft_raw.parquet"
 DPO_INPUT = PROCESSED_DIR / "dpo_raw.parquet"

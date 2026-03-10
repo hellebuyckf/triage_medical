@@ -6,12 +6,16 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from utils import DPO_COLUMNS, SFT_COLUMNS, get_logger, md5_hash
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = _SCRIPTS_DIR.parent
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 FINAL_DIR = PROJECT_ROOT / "data" / "final"
 

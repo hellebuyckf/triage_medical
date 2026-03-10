@@ -183,3 +183,12 @@ __pycache__/
 .claude
 .DS_Store
 CLAUDE.md
+# S2 — SFT
+checkpoints/
+data/processed/sft_tokenized/
+mlruns/
+wandb/
+scripts/training/__pycache__/
+scripts/data_prep/__pycache__/
+# Unsloth — cache de compilation généré automatiquement
+unsloth_compiled_cache/
