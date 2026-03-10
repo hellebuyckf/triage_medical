@@ -1,11 +1,8 @@
-"""Script 11 — Entraînement SFT de Qwen3-1.7B avec LoRA via HuggingFace + PEFT + TRL.
+"""Script 11 — Entraînement SFT de Qwen3-1.7B avec LoRA via Unsloth + TRL.
 
-Workarounds appliqués :
+Workaround appliqué :
 - cublasLt forcé : PyTorch 2.10 cu128 vs CUDA système 12.9 — cuBLAS standard échoue
   sur toute opération half-precision (fp16/bf16). cublasLt utilise un code path compatible.
-- Unsloth bypassé : ses patches Qwen3 (`original_apply_qkv`) produisent des tenseurs
-  non-contigus, incompatibles même avec cublasLt. HF standard + PEFT est ~2x plus lent
-  mais stable. Pour un POC de 4660 exemples, l'impact est acceptable.
 """
 
 import argparse
@@ -16,22 +13,27 @@ import torch
 
 # Workaround : PyTorch cu128 vs CUDA 12.9 — cuBLAS standard crash sur fp16/bf16 GEMM.
 # cublasLt utilise un code path différent qui fonctionne avec le driver 575+.
+# DOIT être appelé avant tout import Unsloth / toute opération CUDA.
 torch.backends.cuda.preferred_blas_library("cublaslt")
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+try:
+    from unsloth import FastLanguageModel
+except ImportError:
+    print(
+        "Unsloth n'est pas installé. Installer avec :\n"
+        "  uv pip install unsloth\n"
+        "Pour CUDA 12.9 : voir https://github.com/unslothai/unsloth#installation",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 import mlflow
 from datasets import load_from_disk
-from peft import LoraConfig, TaskType, get_peft_model
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    PreTrainedModel,
-    PreTrainedTokenizerFast,
-    set_seed,
-)
+from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import SFTConfig, SFTTrainer
 
 from utils import get_latest_checkpoint, get_logger
@@ -65,40 +67,35 @@ MLFLOW_TRACKING_URI = str(PROJECT_ROOT / "mlruns")
 def load_model_and_tokenizer(
     model_name: str,
     max_seq_length: int,
+    load_in_4bit: bool = False,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizerFast]:
-    """Charge le modèle via HuggingFace standard et applique LoRA via PEFT.
-
-    Utilise AutoModelForCausalLM (pas Unsloth FastLanguageModel) pour éviter
-    les patches Qwen3 incompatibles avec bf16 + PEFT LoRA.
+    """Charge le modèle via Unsloth et applique la configuration LoRA.
 
     Args:
         model_name: Identifiant du modèle sur HuggingFace Hub.
-        max_seq_length: Longueur maximale de séquence (pour le tokenizer).
+        max_seq_length: Longueur maximale de séquence.
+        load_in_4bit: Quantification 4-bit si GPU < 16 GB.
 
     Returns:
         Tuple (modèle avec LoRA, tokenizer).
     """
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.padding_side = "right"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.model_max_length = max_seq_length
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_name,
+        max_seq_length=max_seq_length,
+        dtype=None,
+        load_in_4bit=load_in_4bit,
     )
 
-    lora_config = LoraConfig(
+    model = FastLanguageModel.get_peft_model(
+        model,
         r=LORA_R,
-        lora_alpha=LORA_ALPHA,
         target_modules=LORA_TARGET_MODULES,
+        lora_alpha=LORA_ALPHA,
         lora_dropout=LORA_DROPOUT,
         bias="none",
-        task_type=TaskType.CAUSAL_LM,
+        use_gradient_checkpointing="unsloth",
+        random_state=SEED,
     )
-    model = get_peft_model(model, lora_config)
 
     return model, tokenizer
 
@@ -232,7 +229,7 @@ def main() -> None:
     train_dataset = train_dataset.map(lambda x: {"text": x["prompt"] + x["completion"]})
     val_dataset = val_dataset.map(lambda x: {"text": x["prompt"] + x["completion"]})
 
-    # Chargement du modèle + LoRA (HF standard, pas Unsloth)
+    # Chargement du modèle + LoRA
     logger.info("Chargement du modèle %s + LoRA (r=%d, alpha=%d)...", MODEL_NAME, LORA_R, LORA_ALPHA)
     model, tokenizer = load_model_and_tokenizer(MODEL_NAME, MAX_SEQ_LENGTH)
     log_model_info(model, logger)
