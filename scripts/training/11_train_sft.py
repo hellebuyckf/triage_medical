@@ -1,9 +1,4 @@
-"""Script 11 — Entraînement SFT de Qwen3-1.7B avec LoRA via Unsloth + TRL.
-
-Workaround appliqué :
-- cublasLt forcé : PyTorch 2.10 cu128 vs CUDA système 12.9 — cuBLAS standard échoue
-  sur toute opération half-precision (fp16/bf16). cublasLt utilise un code path compatible.
-"""
+"""Script 11 — Entraînement SFT de Qwen3-1.7B avec LoRA via Unsloth + TRL."""
 
 import argparse
 import sys
@@ -11,9 +6,8 @@ from pathlib import Path
 
 import torch
 
-# Workaround : PyTorch cu128 vs CUDA 12.9 — cuBLAS standard crash sur fp16/bf16 GEMM.
-# cublasLt utilise un code path différent qui fonctionne avec le driver 575+.
-# DOIT être appelé avant tout import Unsloth / toute opération CUDA.
+# Workaround : Unsloth patche Qwen3 avec des forward produisant des tenseurs non-contigus.
+# cuBLAS standard crash sur ces tenseurs, cublasLt les gère correctement.
 torch.backends.cuda.preferred_blas_library("cublaslt")
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
@@ -47,12 +41,12 @@ TOKENIZED_DIR = PROJECT_ROOT / "data" / "processed" / "sft_tokenized"
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "sft"
 
 MAX_SEQ_LENGTH = 1024
-LORA_R = 16
-LORA_ALPHA = 32
+LORA_R = 32
+LORA_ALPHA = 64
 LORA_DROPOUT = 0.05
-LORA_TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj"]
+LORA_TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 LEARNING_RATE = 2e-4
-EPOCHS = 3
+EPOCHS = 5
 BATCH_SIZE = 4
 GRAD_ACCUM = 4
 SEED = 42

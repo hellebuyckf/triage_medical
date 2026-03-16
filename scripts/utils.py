@@ -96,6 +96,55 @@ def md5_hash(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
+# ── Triage response formatting (S2 — SFT dataset) ────────────────────────────
+
+_URGENCY_LABELS: dict[str, str] = {
+    "max": "URGENCE MAXIMALE",
+    "moderate": "URGENCE MODÉRÉE",
+    "deferred": "URGENCE DIFFÉRÉE",
+}
+
+_URGENCY_RECOMMENDATIONS: dict[str, str] = {
+    "max": "Appelez le 15 (SAMU) ou rendez-vous aux urgences immédiatement. Ne restez pas seul.",
+    "moderate": "Consultez un médecin ou une unité de soins urgents dans les 24 à 48 heures.",
+    "deferred": "Prenez rendez-vous avec votre médecin traitant dans les prochains jours.",
+}
+
+_MAX_EVAL_CHARS = 500
+
+
+def format_triage_response(urgency_level: str, source_response: str) -> str:
+    """Formate une réponse de triage médical au format attendu par le modèle.
+
+    Transforme une réponse brute (Wikipedia-style) en réponse structurée incluant :
+    - Le niveau d'urgence (URGENCE MAXIMALE / MODÉRÉE / DIFFÉRÉE)
+    - Une évaluation clinique (extraite de la réponse source)
+    - Des recommandations adaptées au niveau d'urgence
+
+    Ce format est indispensable pour que ``extract_urgency_from_response()``
+    puisse parser les prédictions lors de l'évaluation.
+
+    Args:
+        urgency_level: Niveau d'urgence inféré ("max", "moderate", "deferred").
+        source_response: Réponse brute issue des datasets sources (MedQuAD, etc.).
+
+    Returns:
+        Réponse structurée au format triage, prête pour le fine-tuning SFT.
+
+    Example:
+        >>> format_triage_response("max", "Chest pain can indicate a myocardial infarction.")
+        'URGENCE MAXIMALE\\n\\nÉvaluation clinique : Chest pain can indicate...\\n\\nRecommandations : Appelez le 15...'
+    """
+    label = _URGENCY_LABELS.get(urgency_level, _URGENCY_LABELS["moderate"])
+    reco = _URGENCY_RECOMMENDATIONS.get(urgency_level, _URGENCY_RECOMMENDATIONS["moderate"])
+
+    eval_text = source_response.strip()
+    if len(eval_text) > _MAX_EVAL_CHARS:
+        eval_text = eval_text[:_MAX_EVAL_CHARS - 3] + "..."
+
+    return f"{label}\n\nÉvaluation clinique : {eval_text}\n\nRecommandations : {reco}"
+
+
 # ── Prompt formatting (S2 — SFT) ─────────────────────────────────────────────
 
 SYSTEM_PROMPT = """Tu es un agent de triage médical pour le Centre Hospitalier Saint-Aurélien.
@@ -140,7 +189,12 @@ _URGENCY_PATTERNS: dict[str, re.Pattern] = {
 def extract_urgency_from_response(text: str) -> str | None:
     """Extrait le niveau d'urgence depuis une réponse générée par le modèle.
 
-    Cherche les patterns :
+    Cherche les patterns uniquement dans les 150 premiers caractères :
+    le label d'urgence doit apparaître en tête de réponse (première ligne).
+    Limiter la recherche évite de capter des labels spurieux générés dans
+    un second tour "user/assistant" en cas d'arrêt EOS défaillant.
+
+    Patterns recherchés :
     - "URGENCE MAXIMALE" / "maximale" / "urgence max" → "max"
     - "URGENCE MODÉRÉE" / "modérée" / "urgence mod" → "moderate"
     - "URGENCE DIFFÉRÉE" / "différée" / "deferred" → "deferred"
@@ -151,10 +205,107 @@ def extract_urgency_from_response(text: str) -> str | None:
     Returns:
         "max", "moderate", "deferred", ou None si non trouvé.
     """
+    # Limiter la recherche au début de la réponse où le label doit se trouver.
+    # "URGENCE MAXIMALE\n\nÉvaluation clinique..." → label dans les 20 premiers chars.
+    # Marge de 150 chars pour absorber d'éventuels espaces ou tokens parasites.
+    search_text = text[:150]
     for level, pattern in _URGENCY_PATTERNS.items():
-        if pattern.search(text):
+        if pattern.search(search_text):
             return level
     return None
+
+
+# ── Anonymisation — filtre faux positifs Presidio (S1) ───────────────────────
+
+# Seuil de confiance minimum pour les entités PERSON.
+# Les datasets sources (MedQuAD, FrenchMedMCQA, MediQAl) sont des bases de
+# connaissances médicales, pas des données patient. Le NER spaCy génère de nombreux
+# faux positifs sur les éponymes médicaux (noms de syndromes, maladies, médicaments).
+# Un seuil de 0.85 élimine la plupart sans sacrifier les vrais noms de personnes.
+PERSON_CONFIDENCE_THRESHOLD = 0.85
+
+# Termes médicaux à ne jamais masquer même si détectés comme PERSON.
+# Inclut : éponymes (syndromes, maladies), organes mal détectés, abréviations médicales.
+MEDICAL_TERMS_ALLOWLIST: frozenset[str] = frozenset({
+    # Éponymes — maladies et syndromes (EN)
+    "alzheimer", "parkinson", "huntington", "crohn", "hodgkin", "addison",
+    "cushing", "graves", "hashimoto", "wilson", "marfan", "turner", "down",
+    "raynaud", "behcet", "sjogren", "sjögren", "brugada", "wolff",
+    "klinefelter", "noonan", "prader", "willi", "angelman", "rett",
+    "duchenne", "becker", "charcot", "marie", "tooth", "gaucher", "fabry",
+    "niemann", "pick", "pompe", "hurler", "hunter", "sanfilippo", "morquio",
+    "tay", "sachs", "canavan", "krabbe", "batten", "spielmeyer", "vogt",
+    "aicardi", "goutières", "aicardi-goutières", "lennox", "gastaut",
+    "dravet", "landau", "kleffner", "sturge", "weber", "von hippel",
+    "lindau", "neurofibromatosis", "tuberous", "sézary", "szary",
+    "paget", "bowen", "kaposi", "burkitt", "wilms", "ewing", "pott",
+    "bright", "berger", "henoch", "schönlein", "wegener", "goodpasture",
+    "buerger", "takayasu", "horton", "kawasaki", "still", "felty",
+    "reiter", "behçet", "whipple", "menetrier", "zollinger", "ellison",
+    "sipple", "wermer", "verner", "morrison", "ogilvie", "hirschsprung",
+    "meckel", "peutz", "jeghers", "lynch", "cowden", "bannayan",
+    "riley", "day", "fanconi", "blackfan", "diamond", "shwachman",
+    "kostmann", "chediak", "higashi", "wiskott", "aldrich", "bruton",
+    "digeorge", "treacher", "collins", "pierre", "robin", "goldenhar",
+    "charge", "vacter", "vacterl",
+    # Éponymes — maladies et syndromes (FR)
+    "alzheimer", "parkinson", "huntington", "crohn", "hodgkin",
+    "basedow", "quincke", "biermer", "leriche", "osler", "rendu",
+    "weber", "barre", "guillain", "millard", "gubler",
+    # Procédures / examens
+    "x-ray", "x ray", "mri", "ct scan", "ercp",
+    # Organes / termes anatomiques mal détectés
+    "lung", "heart", "kidney", "liver", "spleen", "colon",
+    # Institutions médicales
+    "nih", "cdc", "who", "nhlbi",
+    # Médicaments courants (marques taguées comme personnes)
+    "coversyl", "perindopril", "levothyrox", "doliprane", "aspirin",
+    # Termes génétiques
+    "glut", "brca", "cftr", "mthfr",
+    # Abbréviations souvent mal taguées
+    "arp", "ags",
+    # Labels d'urgence du format triage — ne jamais anonymiser
+    # Presidio/spaCy anglais détecte "URGENCE MODÉRÉE" comme entité PERSON (mot français = nom étranger)
+    "urgence", "maximale", "modérée", "différée",
+})
+
+
+def filter_presidio_false_positives(
+    results: list,
+    text: str,
+    person_threshold: float = PERSON_CONFIDENCE_THRESHOLD,
+    allowlist: frozenset[str] = MEDICAL_TERMS_ALLOWLIST,
+) -> list:
+    """Filtre les faux positifs Presidio sur l'entité PERSON.
+
+    Deux règles de filtrage pour PERSON :
+    1. Score de confiance < person_threshold → exclu (détection trop incertaine).
+    2. Texte détecté dans l'allowlist médicale → exclu (éponyme ou terme médical).
+
+    Les autres entités (LOCATION, DATE_TIME, etc.) ne sont pas filtrées.
+
+    Args:
+        results: Liste des RecognizerResult retournés par AnalyzerEngine.analyze().
+        text: Texte original analysé (pour extraire le span détecté).
+        person_threshold: Seuil de confiance minimum pour PERSON.
+        allowlist: Ensemble de termes médicaux à ne pas masquer.
+
+    Returns:
+        Liste filtrée de RecognizerResult.
+    """
+    filtered = []
+    for result in results:
+        if result.entity_type == "PERSON":
+            if result.score < person_threshold:
+                continue
+            detected = text[result.start:result.end].lower().strip()
+            if detected in allowlist:
+                continue
+            # Vérifier si le terme contient un mot de l'allowlist
+            if any(term in detected for term in allowlist):
+                continue
+        filtered.append(result)
+    return filtered
 
 
 # ── Checkpoint helpers (S2 — entraînement) ───────────────────────────────────

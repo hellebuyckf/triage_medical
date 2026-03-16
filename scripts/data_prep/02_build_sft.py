@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from utils import (
     SFT_COLUMNS,
+    format_triage_response,
     get_logger,
     infer_urgency,
     is_valid_sft_row,
@@ -51,13 +52,13 @@ def transform_frenchmedmcqa(row: dict) -> dict | None:
         return None
 
     instruction = "Question médicale : " + question
-    response = "Réponse correcte : " + correct_text + "."
+    raw_response = "Réponse correcte : " + correct_text + "."
 
-    urgency_level, confidence = infer_urgency(instruction + " " + response)
+    urgency_level, confidence = infer_urgency(instruction + " " + raw_response)
 
     return {
         "instruction": instruction,
-        "response": response,
+        "response": format_triage_response(urgency_level, raw_response),
         "source": "frenchmedmcqa",
         "language": "fr",
         "urgency_level": urgency_level,
@@ -80,7 +81,7 @@ def transform_medquad(row: dict) -> dict | None:
 
     return {
         "instruction": instruction,
-        "response": response,
+        "response": format_triage_response(urgency_level, response),
         "source": "medquad",
         "language": "en",
         "urgency_level": urgency_level,
@@ -116,13 +117,13 @@ def transform_mediql_mcqu(row: dict) -> dict | None:
     else:
         instruction = "Question médicale (examen) : " + question
 
-    response = "Réponse correcte : " + response_text + "."
+    raw_response = "Réponse correcte : " + response_text + "."
 
-    urgency_level, confidence = infer_urgency(instruction + " " + response)
+    urgency_level, confidence = infer_urgency(instruction + " " + raw_response)
 
     return {
         "instruction": instruction,
-        "response": response,
+        "response": format_triage_response(urgency_level, raw_response),
         "source": "mediql_mcqu",
         "language": "fr",
         "urgency_level": urgency_level,
@@ -142,13 +143,13 @@ def transform_mediql_oeq(row: dict) -> dict | None:
         return None
 
     instruction = "Question médicale (examen) : " + question
-    response = str(answer)
+    raw_response = str(answer)
 
-    urgency_level, confidence = infer_urgency(instruction + " " + response)
+    urgency_level, confidence = infer_urgency(instruction + " " + raw_response)
 
     return {
         "instruction": instruction,
-        "response": response,
+        "response": format_triage_response(urgency_level, raw_response),
         "source": "mediql_oeq",
         "language": "fr",
         "urgency_level": urgency_level,

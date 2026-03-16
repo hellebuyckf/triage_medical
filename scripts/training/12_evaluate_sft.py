@@ -6,20 +6,16 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import torch
+
+# Workaround : Unsloth patche les modèles Qwen3 au niveau de transformers à l'installation.
+# Même en chargeant via AutoModelForCausalLM, les forward patchés produisent des tenseurs
+# non-contigus qui crashent cuBLAS standard. cublasLt utilise un code path compatible.
+torch.backends.cuda.preferred_blas_library("cublaslt")
+
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-
-try:
-    from unsloth import FastLanguageModel
-except ImportError:
-    print(
-        "Unsloth n'est pas installé. Installer avec :\n"
-        "  uv pip install unsloth\n"
-        "Pour CUDA 12.9 : voir https://github.com/unslothai/unsloth#installation",
-        file=sys.stderr,
-    )
-    sys.exit(1)
 
 import mlflow
 import pandas as pd
@@ -27,7 +23,7 @@ import torch
 from peft import PeftModel
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from tqdm import tqdm
-from transformers import PreTrainedModel, PreTrainedTokenizerFast
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerFast
 
 from utils import extract_urgency_from_response, format_chat_prompt, get_logger
 
@@ -63,7 +59,8 @@ def load_finetuned_model(
 ) -> tuple[PreTrainedModel, PreTrainedTokenizerFast]:
     """Charge le modèle de base puis applique les poids LoRA depuis le checkpoint.
 
-    Active FastLanguageModel.for_inference() pour accélérer la génération (2x).
+    Utilise HF standard (pas Unsloth) car les patches Qwen3 d'Unsloth produisent
+    des tenseurs non-contigus incompatibles avec model.generate() + PEFT LoRA.
 
     Args:
         model_name: Identifiant du modèle de base sur HuggingFace Hub.
@@ -73,14 +70,18 @@ def load_finetuned_model(
     Returns:
         Tuple (modèle prêt pour l'inférence, tokenizer).
     """
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_name,
-        max_seq_length=max_seq_length,
-        dtype=None,
-        load_in_4bit=False,
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
     )
     model = PeftModel.from_pretrained(model, str(checkpoint_dir))
-    FastLanguageModel.for_inference(model)
+    model.eval()
     return model, tokenizer
 
 
@@ -93,7 +94,8 @@ def generate_response(
     """Génère une réponse à partir d'une instruction en mode greedy.
 
     Formate l'instruction en ChatML (sans le tour réponse), tokenise,
-    génère, puis décode uniquement les tokens produits.
+    génère, puis décode uniquement les tokens produits jusqu'au premier
+    token <|im_end|> (EOS du tour assistant en ChatML Qwen3).
 
     Args:
         model: Modèle fine-tuné prêt pour l'inférence.
@@ -102,11 +104,16 @@ def generate_response(
         max_new_tokens: Nombre max de tokens à générer.
 
     Returns:
-        Texte de la réponse générée.
+        Texte de la réponse générée, tronqué au premier <|im_end|>.
     """
     prompt = format_chat_prompt(instruction, response="")
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     input_length = inputs["input_ids"].shape[1]
+
+    # <|im_end|> est le token de fin de tour assistant en ChatML Qwen3.
+    # Sans eos_token_id explicite, le modèle peut continuer à générer
+    # un second tour "user/assistant" spurieux.
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -114,9 +121,17 @@ def generate_response(
             max_new_tokens=max_new_tokens,
             do_sample=DO_SAMPLE,
             temperature=1.0,
+            eos_token_id=im_end_id,
         )
 
     generated_ids = output_ids[0][input_length:]
+
+    # Tronquer au premier <|im_end|> comme filet de sécurité
+    # (au cas où eos_token_id n'aurait pas stoppé à temps)
+    eos_positions = (generated_ids == im_end_id).nonzero(as_tuple=True)[0]
+    if len(eos_positions) > 0:
+        generated_ids = generated_ids[:eos_positions[0]]
+
     return tokenizer.decode(generated_ids, skip_special_tokens=True)
 
 

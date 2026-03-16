@@ -16,7 +16,7 @@ from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 from tqdm import tqdm
 
-from utils import get_logger
+from utils import filter_presidio_false_positives, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
@@ -65,6 +65,7 @@ def anonymize_text(
         return text, []
 
     results = analyzer.analyze(text=text, entities=ENTITIES, language=language)
+    results = filter_presidio_false_positives(results, text)
 
     entities_found = [
         {
