@@ -1,5 +1,6 @@
 .PHONY: all setup download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
+        dpo-pipeline train-dpo evaluate-dpo export-model \
         clean clean-all help
 
 # Variables
@@ -55,6 +56,23 @@ evaluate-sft: train-sft
 # Pipeline complet S2
 sft-pipeline: prepare-tokenizer train-sft evaluate-sft
 
+# ── Semaine 3 — Pipeline DPO ──────────────────────────────────────────────────
+
+# Pipeline complet S3
+dpo-pipeline: train-dpo evaluate-dpo export-model
+
+# Étape 20 : alignement DPO LoRA
+train-dpo:
+	$(PYTHON) $(TRAINING)/20_train_dpo.py
+
+# Étape 21 : évaluation SFT vs DPO
+evaluate-dpo: train-dpo
+	$(PYTHON) $(TRAINING)/21_evaluate_dpo.py
+
+# Étape 22 : fusion des poids LoRA et export HuggingFace
+export-model: evaluate-dpo
+	$(PYTHON) $(TRAINING)/22_export_model.py
+
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 
 # Nettoyage des fichiers intermédiaires (raw et processed)
@@ -86,6 +104,12 @@ help:
 	@echo "  make prepare-tokenizer — tokenisation + formatage ChatML"
 	@echo "  make train-sft         — entraînement SFT LoRA"
 	@echo "  make evaluate-sft      — évaluation du modèle fine-tuné"
+	@echo ""
+	@echo "  Semaine 3 — DPO"
+	@echo "  make dpo-pipeline      — pipeline complet S3 (train → eval → export)"
+	@echo "  make train-dpo         — alignement DPO LoRA"
+	@echo "  make evaluate-dpo      — évaluation SFT vs DPO + rapport"
+	@echo "  make export-model      — fusion LoRA + export format HuggingFace"
 	@echo ""
 	@echo "  Nettoyage"
 	@echo "  make clean             — supprime raw/ et processed/"

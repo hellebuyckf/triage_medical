@@ -177,6 +177,7 @@ pyrightconfig.json
 data/final/
 data/raw/
 data/processed/
+data/annotation/
 __pycache__/
 .venv/
 *.pyc

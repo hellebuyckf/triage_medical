@@ -308,6 +308,40 @@ def filter_presidio_false_positives(
     return filtered
 
 
+# ── DPO formatting (S3) ──────────────────────────────────────────────────────
+
+
+def format_dpo_prompt(prompt: str) -> str:
+    """Formate un prompt DPO au format ChatML Qwen3 (sans le tour assistant).
+
+    Utilisé pour la colonne 'prompt' du DPOTrainer. Le trainer concatène
+    ce préfixe avec chosen/rejected pour former les séquences d'entraînement.
+
+    Args:
+        prompt: L'instruction ou question médicale brute.
+
+    Returns:
+        Prompt formaté en ChatML, terminant par ``<|im_start|>assistant\\n``.
+    """
+    return (
+        f"<|im_start|>system\n{SYSTEM_PROMPT}\n<|im_end|>\n"
+        f"<|im_start|>user\n{prompt}\n<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
+
+
+def format_dpo_response(response: str) -> str:
+    """Formate une réponse DPO (chosen ou rejected) avec le token de fin de tour.
+
+    Args:
+        response: Texte de la réponse de l'assistant.
+
+    Returns:
+        Réponse avec ``<|im_end|>`` en suffixe (EOS du tour assistant en ChatML).
+    """
+    return f"{response}<|im_end|>"
+
+
 # ── Checkpoint helpers (S2 — entraînement) ───────────────────────────────────
 
 
