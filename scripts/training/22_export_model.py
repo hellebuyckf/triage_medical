@@ -10,8 +10,14 @@ Stratégie :
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
+
+_ARTIFACT_RE = re.compile(
+    r"(ForCanBeConverted|𫟦|\uFFFD+|\n\s*(?:user|assistant)\s*\n.*)",
+    re.DOTALL | re.IGNORECASE,
+)
 
 import torch
 
@@ -175,18 +181,31 @@ def verify_export(
     chatml_prompt = format_dpo_prompt(test_prompt)
     inputs = tokenizer(chatml_prompt, return_tensors="pt").to(model.device)
 
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    stop_ids: list[int] = [im_end_id]
+    if tokenizer.eos_token_id is not None and tokenizer.eos_token_id != im_end_id:
+        stop_ids.append(tokenizer.eos_token_id)
+
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
             max_new_tokens=256,
-            temperature=0.1,
             do_sample=False,
-            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=stop_ids,
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
         )
 
-    # Décoder uniquement les nouveaux tokens
-    new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
-    response = tokenizer.decode(new_tokens, skip_special_tokens=True)
+    # Décoder uniquement les nouveaux tokens, tronquer au premier stop token
+    input_len = inputs["input_ids"].shape[1]
+    generated_ids = output_ids[0][input_len:]
+    for stop_id in stop_ids:
+        positions = (generated_ids == stop_id).nonzero(as_tuple=True)[0]
+        if len(positions) > 0:
+            generated_ids = generated_ids[: positions[0]]
+            break
+
+    raw = tokenizer.decode(generated_ids, skip_special_tokens=True)
+    response = _ARTIFACT_RE.sub("", raw).strip()
 
     log("Prompt test : %s", test_prompt)
     log("Réponse générée :\n%s", response)

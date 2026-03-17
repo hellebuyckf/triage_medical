@@ -5,6 +5,7 @@ de comparaison avant/après alignement avec exemples qualitatifs.
 """
 
 import argparse
+import re
 import random
 import sys
 from datetime import datetime
@@ -55,6 +56,26 @@ URGENCY_LABELS = ["max", "moderate", "deferred"]
 
 MLFLOW_EXPERIMENT = "dpo-qwen3-1.7b-triage"
 MLFLOW_TRACKING_URI = str(PROJECT_ROOT / "mlruns")
+
+# Regex pour supprimer les artifacts de génération Qwen3 :
+# - ForCanBeConverted, 𫟦, caractères de remplacement Unicode (U+FFFD)
+# - Reprise hallucinée de conversation : \nuser\n... ou \nassistant\n...
+_ARTIFACT_RE = re.compile(
+    r"(ForCanBeConverted|𫟦|\uFFFD+|\n\s*(?:user|assistant)\s*\n.*)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_artifacts(text: str) -> str:
+    """Supprime les tokens parasites connus produits par Qwen3.
+
+    Args:
+        text: Texte décodé brut depuis le tokenizer.
+
+    Returns:
+        Texte nettoyé, tronqué avant toute reprise hallucinée de conversation.
+    """
+    return _ARTIFACT_RE.sub("", text).strip()
 
 
 # ── Fonctions ─────────────────────────────────────────────────────────────────
@@ -154,6 +175,11 @@ def generate_response(
     input_length = inputs["input_ids"].shape[1]
 
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    # Stop sur <|im_end|> ET sur le token EOS natif du tokenizer (évite les
+    # reprises hallucinées de conversation quand le modèle ne génère pas <|im_end|>)
+    stop_ids: list[int] = [im_end_id]
+    if tokenizer.eos_token_id is not None and tokenizer.eos_token_id != im_end_id:
+        stop_ids.append(tokenizer.eos_token_id)
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -161,16 +187,21 @@ def generate_response(
             max_new_tokens=max_new_tokens,
             do_sample=DO_SAMPLE,
             temperature=1.0,
-            eos_token_id=im_end_id,
+            eos_token_id=stop_ids,
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
             repetition_penalty=1.1,
         )
 
     generated_ids = output_ids[0][input_length:]
-    eos_positions = (generated_ids == im_end_id).nonzero(as_tuple=True)[0]
-    if len(eos_positions) > 0:
-        generated_ids = generated_ids[: eos_positions[0]]
+    # Tronquer au premier token stop rencontré
+    for stop_id in stop_ids:
+        positions = (generated_ids == stop_id).nonzero(as_tuple=True)[0]
+        if len(positions) > 0:
+            generated_ids = generated_ids[: positions[0]]
+            break
 
-    return tokenizer.decode(generated_ids, skip_special_tokens=True)
+    text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+    return _strip_artifacts(text)
 
 
 def check_format_compliance(text: str) -> bool:
