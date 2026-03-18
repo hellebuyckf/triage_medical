@@ -76,7 +76,7 @@ export-model: evaluate-dpo
 # ── MLflow ────────────────────────────────────────────────────────────────────
 
 mlflow:
-	uv run mlflow ui --backend-store-uri mlruns --port 5000
+	uv run mlflow ui --backend-store-uri mlruns --host 0.0.0.0 --port 5000
 
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 
