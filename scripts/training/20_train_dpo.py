@@ -322,10 +322,11 @@ def main() -> None:
         tokenizer.save_pretrained(str(DPO_CHECKPOINT))
         logger.info("Adaptateur LoRA DPO sauvegardé dans %s", DPO_CHECKPOINT)
 
-        # Artefacts MLflow
-        adapter_config = DPO_CHECKPOINT / "adapter_config.json"
-        if adapter_config.exists():
-            mlflow.log_artifact(str(adapter_config))
+        # Log des artefacts MLflow — poids LoRA finaux (fichiers top-level uniquement,
+        # on exclut les sous-dossiers checkpoint-N/ qui sont des sauvegardes intermédiaires)
+        for f in sorted(DPO_CHECKPOINT.iterdir()):
+            if f.is_file():
+                mlflow.log_artifact(str(f), artifact_path="adapter")
 
     logger.info("=== Entraînement DPO terminé. ===")
 
