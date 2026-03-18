@@ -1,12 +1,15 @@
 .PHONY: all setup download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
         dpo-pipeline train-dpo evaluate-dpo export-model \
-        mlflow clean clean-all help
+        mlflow mlflow-build mlflow-up mlflow-down mlflow-logs \
+        clean clean-all help
 
 # Variables
-PYTHON   = uv run python
-DATA_PREP = scripts/data_prep
-TRAINING  = scripts/training
+PYTHON          = uv run python
+DATA_PREP       = scripts/data_prep
+TRAINING        = scripts/training
+MLFLOW_IMAGE    = project14-mlflow
+MLFLOW_CONTAINER = project14-mlflow
 
 # Cible par défaut : pipeline complet S1
 all: download build-sft build-dpo anonymize split
@@ -73,14 +76,36 @@ evaluate-dpo: train-dpo
 export-model: evaluate-dpo
 	$(PYTHON) $(TRAINING)/22_export_model.py
 
-# ── MLflow ────────────────────────────────────────────────────────────────────
-
-# Lance MLflow sur localhost:5000 (serveur Ubuntu).
+# ── MLflow (Docker) ───────────────────────────────────────────────────────────
+#
 # Accès depuis le Mac M3 via tunnel SSH :
 #   ssh -L 5000:localhost:5000 <user>@<ip_serveur>
 # puis ouvrir http://localhost:5000 dans le navigateur.
-mlflow:
-	uv run mlflow ui --backend-store-uri mlruns --host 127.0.0.1 --port 5000
+
+# Build de l'image Docker MLflow
+mlflow-build:
+	docker build -t $(MLFLOW_IMAGE) -f docker/mlflow/Dockerfile .
+
+# Démarrage du conteneur (détaché, redémarre automatiquement)
+mlflow-up:
+	docker run -d \
+		--name $(MLFLOW_CONTAINER) \
+		-p 127.0.0.1:5000:5000 \
+		-v $(PWD)/mlruns:/mlruns:ro \
+		--restart unless-stopped \
+		$(MLFLOW_IMAGE)
+	@echo "MLflow UI démarré → tunnel SSH : ssh -L 5000:localhost:5000 <user>@<ip_serveur>"
+
+# Arrêt et suppression du conteneur
+mlflow-down:
+	docker stop $(MLFLOW_CONTAINER) && docker rm $(MLFLOW_CONTAINER)
+
+# Logs du conteneur en temps réel
+mlflow-logs:
+	docker logs -f $(MLFLOW_CONTAINER)
+
+# Alias pratique : build + up en une commande
+mlflow: mlflow-build mlflow-up
 
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 
@@ -120,8 +145,12 @@ help:
 	@echo "  make evaluate-dpo      — évaluation SFT vs DPO + rapport"
 	@echo "  make export-model      — fusion LoRA + export format HuggingFace"
 	@echo ""
-	@echo "  MLflow"
-	@echo "  make mlflow            — lance l'UI MLflow sur http://localhost:5000"
+	@echo "  MLflow (Docker)"
+	@echo "  make mlflow            — build + démarre le conteneur MLflow"
+	@echo "  make mlflow-build      — construit l'image Docker MLflow"
+	@echo "  make mlflow-up         — démarre le conteneur (port 127.0.0.1:5000)"
+	@echo "  make mlflow-down       — arrête et supprime le conteneur"
+	@echo "  make mlflow-logs       — affiche les logs du conteneur"
 	@echo ""
 	@echo "  Nettoyage"
 	@echo "  make clean             — supprime raw/ et processed/"
