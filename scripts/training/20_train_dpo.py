@@ -189,7 +189,6 @@ def build_dpo_config(output_dir: Path) -> DPOConfig:
         beta=BETA,
         loss_type="sigmoid",           # DPO classique (Rafailov et al. 2023)
         max_length=MAX_SEQ_LENGTH,
-        max_prompt_length=512,         # prompt system+user < 512 tokens sur ce dataset
         logging_steps=10,
         eval_strategy="steps",
         eval_steps=50,
@@ -270,60 +269,63 @@ def main() -> None:
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
-    # Configuration DPO
-    config = build_dpo_config(DPO_CHECKPOINT)
-    config.beta = args.beta
-    config.num_train_epochs = args.epochs
+    # Le start_run explicite garantit que le callback HuggingFace utilise ce run
+    # pour les métriques de steps (loss curves) au lieu de créer un nested run.
+    with mlflow.start_run(run_name="dpo-qwen3-1.7b-triage"):
+        # Configuration DPO
+        config = build_dpo_config(DPO_CHECKPOINT)
+        config.beta = args.beta
+        config.num_train_epochs = args.epochs
 
-    # DPOTrainer
-    # ref_model=None : TRL utilise le modèle SFT fusionné (sans adaptateur DPO) comme référence.
-    trainer = DPOTrainer(
-        model=model,
-        ref_model=None,
-        args=config,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        processing_class=tokenizer,
-    )
+        # DPOTrainer
+        # ref_model=None : TRL utilise le modèle SFT fusionné (sans adaptateur DPO) comme référence.
+        trainer = DPOTrainer(
+            model=model,
+            ref_model=None,
+            args=config,
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
+            processing_class=tokenizer,
+        )
 
-    # Log hyperparamètres
-    mlflow.log_params({
-        "model_name": MODEL_NAME,
-        "sft_checkpoint": str(SFT_CHECKPOINT),
-        "beta": args.beta,
-        "learning_rate": LEARNING_RATE,
-        "epochs": args.epochs,
-        "batch_size": BATCH_SIZE,
-        "gradient_accumulation": GRAD_ACCUM,
-        "lora_r": LORA_R,
-        "lora_alpha": LORA_ALPHA,
-        "train_pairs": len(train_dataset),
-        "val_pairs": len(val_dataset),
-    })
+        # Log hyperparamètres
+        mlflow.log_params({
+            "model_name": MODEL_NAME,
+            "sft_checkpoint": str(SFT_CHECKPOINT),
+            "beta": args.beta,
+            "learning_rate": LEARNING_RATE,
+            "epochs": args.epochs,
+            "batch_size": BATCH_SIZE,
+            "gradient_accumulation": GRAD_ACCUM,
+            "lora_r": LORA_R,
+            "lora_alpha": LORA_ALPHA,
+            "train_pairs": len(train_dataset),
+            "val_pairs": len(val_dataset),
+        })
 
-    # Entraînement
-    logger.info("Lancement de l'entraînement DPO...")
-    try:
-        trainer.train(resume_from_checkpoint=str(resume_path) if resume_path else None)
-    except RuntimeError as e:
-        if "CUDA out of memory" in str(e):
-            logger.error(
-                "OOM CUDA ! Suggestions :\n"
-                "  1. Réduire BATCH_SIZE à 1 et augmenter GRAD_ACCUM à 16\n"
-                "  2. Réduire max_length à 512 dans DPOConfig"
-            )
-        raise
+        # Entraînement
+        logger.info("Lancement de l'entraînement DPO...")
+        try:
+            trainer.train(resume_from_checkpoint=str(resume_path) if resume_path else None)
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                logger.error(
+                    "OOM CUDA ! Suggestions :\n"
+                    "  1. Réduire BATCH_SIZE à 1 et augmenter GRAD_ACCUM à 16\n"
+                    "  2. Réduire max_length à 512 dans DPOConfig"
+                )
+            raise
 
-    # Sauvegarde
-    DPO_CHECKPOINT.mkdir(parents=True, exist_ok=True)
-    trainer.save_model(str(DPO_CHECKPOINT))
-    tokenizer.save_pretrained(str(DPO_CHECKPOINT))
-    logger.info("Adaptateur LoRA DPO sauvegardé dans %s", DPO_CHECKPOINT)
+        # Sauvegarde
+        DPO_CHECKPOINT.mkdir(parents=True, exist_ok=True)
+        trainer.save_model(str(DPO_CHECKPOINT))
+        tokenizer.save_pretrained(str(DPO_CHECKPOINT))
+        logger.info("Adaptateur LoRA DPO sauvegardé dans %s", DPO_CHECKPOINT)
 
-    # Artefacts MLflow
-    adapter_config = DPO_CHECKPOINT / "adapter_config.json"
-    if adapter_config.exists():
-        mlflow.log_artifact(str(adapter_config))
+        # Artefacts MLflow
+        adapter_config = DPO_CHECKPOINT / "adapter_config.json"
+        if adapter_config.exists():
+            mlflow.log_artifact(str(adapter_config))
 
     logger.info("=== Entraînement DPO terminé. ===")
 

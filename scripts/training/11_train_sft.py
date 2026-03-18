@@ -231,52 +231,55 @@ def main() -> None:
     # Configuration MLflow
     setup_mlflow()
 
-    # Configuration SFT + Trainer
-    config = build_sft_config(CHECKPOINT_DIR)
-    trainer = build_trainer(model, tokenizer, train_dataset, val_dataset, config)
+    # Le start_run explicite garantit que le callback HuggingFace utilise ce run
+    # pour les métriques de steps (loss curves) au lieu de créer un nested run.
+    with mlflow.start_run(run_name="sft-qwen3-1.7b-triage"):
+        # Configuration SFT + Trainer
+        config = build_sft_config(CHECKPOINT_DIR)
+        trainer = build_trainer(model, tokenizer, train_dataset, val_dataset, config)
 
-    # Note : la loss est calculée sur toute la séquence (prompt + réponse).
-    # Impact pour un POC : léger surapprentissage du format prompt, acceptable à 4660 exemples.
-    logger.info("Entraînement sur séquence complète (pas de loss masking).")
+        # Note : la loss est calculée sur toute la séquence (prompt + réponse).
+        # Impact pour un POC : léger surapprentissage du format prompt, acceptable à 4660 exemples.
+        logger.info("Entraînement sur séquence complète (pas de loss masking).")
 
-    # Log des hyperparamètres
-    mlflow.log_params({
-        "model_name": MODEL_NAME,
-        "lora_r": LORA_R,
-        "lora_alpha": LORA_ALPHA,
-        "lora_dropout": LORA_DROPOUT,
-        "learning_rate": LEARNING_RATE,
-        "epochs": EPOCHS,
-        "batch_size": BATCH_SIZE,
-        "gradient_accumulation": GRAD_ACCUM,
-        "max_seq_length": MAX_SEQ_LENGTH,
-        "train_examples": len(train_dataset),
-        "val_examples": len(val_dataset),
-    })
+        # Log des hyperparamètres
+        mlflow.log_params({
+            "model_name": MODEL_NAME,
+            "lora_r": LORA_R,
+            "lora_alpha": LORA_ALPHA,
+            "lora_dropout": LORA_DROPOUT,
+            "learning_rate": LEARNING_RATE,
+            "epochs": EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "gradient_accumulation": GRAD_ACCUM,
+            "max_seq_length": MAX_SEQ_LENGTH,
+            "train_examples": len(train_dataset),
+            "val_examples": len(val_dataset),
+        })
 
-    # Entraînement
-    logger.info("Lancement de l'entraînement...")
-    try:
-        trainer.train(resume_from_checkpoint=str(resume_path) if resume_path else None)
-    except RuntimeError as e:
-        if "CUDA out of memory" in str(e):
-            logger.error(
-                "OOM CUDA ! Suggestions :\n"
-                "  1. Réduire BATCH_SIZE à 2 et augmenter GRAD_ACCUM à 8\n"
-                "  2. Réduire MAX_SEQ_LENGTH à 512"
-            )
-        raise
+        # Entraînement
+        logger.info("Lancement de l'entraînement...")
+        try:
+            trainer.train(resume_from_checkpoint=str(resume_path) if resume_path else None)
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                logger.error(
+                    "OOM CUDA ! Suggestions :\n"
+                    "  1. Réduire BATCH_SIZE à 2 et augmenter GRAD_ACCUM à 8\n"
+                    "  2. Réduire MAX_SEQ_LENGTH à 512"
+                )
+            raise
 
-    # Sauvegarde de l'adaptateur LoRA + tokenizer
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    trainer.save_model(str(CHECKPOINT_DIR))
-    tokenizer.save_pretrained(str(CHECKPOINT_DIR))
-    logger.info("Adaptateur LoRA sauvegardé dans %s", CHECKPOINT_DIR)
+        # Sauvegarde de l'adaptateur LoRA + tokenizer
+        CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        trainer.save_model(str(CHECKPOINT_DIR))
+        tokenizer.save_pretrained(str(CHECKPOINT_DIR))
+        logger.info("Adaptateur LoRA sauvegardé dans %s", CHECKPOINT_DIR)
 
-    # Log des artefacts MLflow
-    adapter_config = CHECKPOINT_DIR / "adapter_config.json"
-    if adapter_config.exists():
-        mlflow.log_artifact(str(adapter_config))
+        # Log des artefacts MLflow
+        adapter_config = CHECKPOINT_DIR / "adapter_config.json"
+        if adapter_config.exists():
+            mlflow.log_artifact(str(adapter_config))
 
     logger.info("=== Entraînement SFT terminé. ===")
 
