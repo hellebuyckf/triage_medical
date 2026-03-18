@@ -75,8 +75,12 @@ export-model: evaluate-dpo
 
 # ── MLflow ────────────────────────────────────────────────────────────────────
 
+# Lance MLflow sur localhost:5000 (serveur Ubuntu).
+# Accès depuis le Mac M3 via tunnel SSH :
+#   ssh -L 5000:localhost:5000 <user>@<ip_serveur>
+# puis ouvrir http://localhost:5000 dans le navigateur.
 mlflow:
-	uv run mlflow ui --backend-store-uri mlruns --host 0.0.0.0 --port 5000
+	uv run mlflow ui --backend-store-uri mlruns --host 127.0.0.1 --port 5000
 
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 
