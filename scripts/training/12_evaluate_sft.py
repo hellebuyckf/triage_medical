@@ -374,11 +374,27 @@ def generate_eval_report(
 
 def main() -> None:
     """Pipeline d'évaluation SFT : génération + métriques + rapport."""
-    parser = argparse.ArgumentParser(description="Évaluation du modèle SFT")
+    parser = argparse.ArgumentParser(
+        description="Évaluation du modèle SFT.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Note sur --eval-val :\n"
+            "  Le val set est utilisé pendant l'entraînement pour sélectionner le\n"
+            "  meilleur checkpoint (load_best_model_at_end=True). Les métriques val\n"
+            "  sont donc biaisées (le modèle a été optimisé sur ce split).\n"
+            "  Seul le test set fournit une estimation honnête des performances.\n"
+            "  --eval-val est utile uniquement pour debugger ou vérifier la cohérence\n"
+            "  avec les métriques du Trainer (~3h30 de GPU supplémentaires)."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="Logging DEBUG")
     parser.add_argument(
         "--n-eval", type=int, default=None,
         help="Nombre d'exemples à évaluer par split (None = tous). Utile pour le debug.",
+    )
+    parser.add_argument(
+        "--eval-val", action="store_true", default=False,
+        help="Évalue aussi sur le val set (biaisé — voir note ci-dessous). Désactivé par défaut.",
     )
     args = parser.parse_args()
 
@@ -409,36 +425,47 @@ def main() -> None:
         logger.info("Modèle chargé en mode inférence.")
 
         # Chargement des données
-        df_val = pd.read_parquet(SFT_VAL_PATH)
         df_test = pd.read_parquet(SFT_TEST_PATH)
-        logger.info("Val: %d exemples | Test: %d exemples", len(df_val), len(df_test))
+        logger.info("Test: %d exemples", len(df_test))
 
-        # Évaluation
-        logger.info("Évaluation sur le val set...")
-        val_metrics = evaluate_split(model, tokenizer, df_val, "val", n_eval=args.n_eval, logger=logger)
+        # Évaluation val (optionnelle — biaisée, désactivée par défaut)
+        val_metrics = None
+        if args.eval_val:
+            logger.warning(
+                "--eval-val activé : le val set a servi à sélectionner le checkpoint "
+                "(load_best_model_at_end=True) — métriques biaisées, ~3h30 supplémentaires."
+            )
+            df_val = pd.read_parquet(SFT_VAL_PATH)
+            val_metrics = evaluate_split(model, tokenizer, df_val, "val", n_eval=args.n_eval, logger=logger)
 
+        # Évaluation test (référence honnête)
         logger.info("Évaluation sur le test set...")
         test_metrics = evaluate_split(model, tokenizer, df_test, "test", n_eval=args.n_eval, logger=logger)
 
-        # Exemples
-        good_ex, bad_ex = sample_good_bad_examples(val_metrics["predictions"])
+        # Exemples (depuis test si val non disponible)
+        source_predictions = val_metrics["predictions"] if val_metrics else test_metrics["predictions"]
+        good_ex, bad_ex = sample_good_bad_examples(source_predictions)
 
         # Rapport
-        report = generate_eval_report(val_metrics, test_metrics, good_ex, bad_ex)
+        report = generate_eval_report(val_metrics or test_metrics, test_metrics, good_ex, bad_ex)
         REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
         REPORT_PATH.write_text(report, encoding="utf-8")
         logger.info("Rapport d'évaluation sauvegardé dans %s", REPORT_PATH)
 
         # Métriques + artefacts
-        mlflow.log_metrics({
-            "val_accuracy": val_metrics["accuracy"],
-            "val_f1_macro": val_metrics["f1_macro"],
-            "val_format_compliance": val_metrics["format_compliance"],
-            "val_n_unparseable": val_metrics["n_unparseable"],
+        metrics_to_log = {
             "test_accuracy": test_metrics["accuracy"],
             "test_f1_macro": test_metrics["f1_macro"],
             "test_format_compliance": test_metrics["format_compliance"],
-        })
+        }
+        if val_metrics:
+            metrics_to_log.update({
+                "val_accuracy": val_metrics["accuracy"],
+                "val_f1_macro": val_metrics["f1_macro"],
+                "val_format_compliance": val_metrics["format_compliance"],
+                "val_n_unparseable": val_metrics["n_unparseable"],
+            })
+        mlflow.log_metrics(metrics_to_log)
         mlflow.log_artifact(str(REPORT_PATH))
 
     logger.info("=== Évaluation terminée. ===")

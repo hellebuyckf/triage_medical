@@ -11,6 +11,12 @@ TRAINING        = scripts/training
 MLFLOW_IMAGE    = project14-mlflow
 MLFLOW_CONTAINER = project14-mlflow
 
+# Evaluation options
+# Set EVAL_VAL=1 to also evaluate on the val set (biased — model was selected on val loss).
+# Example: make evaluate-sft EVAL_VAL=1
+EVAL_VAL        ?= 0
+_EVAL_VAL_FLAG  = $(if $(filter 1,$(EVAL_VAL)),--eval-val,)
+
 # Cible par défaut
 .DEFAULT_GOAL := help
 
@@ -51,7 +57,7 @@ train-sft: prepare-tokenizer
 	$(PYTHON) $(TRAINING)/11_train_sft.py
 
 evaluate-sft: train-sft
-	$(PYTHON) $(TRAINING)/12_evaluate_sft.py
+	$(PYTHON) $(TRAINING)/12_evaluate_sft.py $(_EVAL_VAL_FLAG)
 
 # ── DPO ───────────────────────────────────────────────────────────────────────
 
@@ -61,7 +67,7 @@ train-dpo:
 	$(PYTHON) $(TRAINING)/20_train_dpo.py
 
 evaluate-dpo: train-dpo
-	$(PYTHON) $(TRAINING)/21_evaluate_dpo.py
+	$(PYTHON) $(TRAINING)/21_evaluate_dpo.py $(_EVAL_VAL_FLAG)
 
 export-model: evaluate-dpo
 	$(PYTHON) $(TRAINING)/22_export_model.py
@@ -124,12 +130,14 @@ help:
 	@echo "  make sft-pipeline      — pipeline complet SFT (tokenize → train → eval)"
 	@echo "  make prepare-tokenizer — tokenisation + formatage ChatML"
 	@echo "  make train-sft         — entraînement SFT LoRA"
-	@echo "  make evaluate-sft      — évaluation du modèle fine-tuné"
+	@echo "  make evaluate-sft      — évaluation sur test set (honnête)"
+	@echo "  make evaluate-sft EVAL_VAL=1  — idem + val set (biaisé, désactivé par défaut)"
 	@echo ""
 	@echo "  DPO"
 	@echo "  make dpo-pipeline      — pipeline complet DPO (train → eval → export)"
 	@echo "  make train-dpo         — alignement DPO LoRA"
-	@echo "  make evaluate-dpo      — évaluation SFT vs DPO + rapport"
+	@echo "  make evaluate-dpo      — évaluation SFT vs DPO sur test set (honnête)"
+	@echo "  make evaluate-dpo EVAL_VAL=1  — idem + val set (biaisé, désactivé par défaut)"
 	@echo "  make export-model      — fusion LoRA + export format HuggingFace"
 	@echo ""
 	@echo "  MLflow"

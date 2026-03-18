@@ -465,7 +465,19 @@ def generate_dpo_eval_report(
 
 def main() -> None:
     """Pipeline d'évaluation DPO : compare SFT vs DPO + génère le rapport."""
-    parser = argparse.ArgumentParser(description="Évaluation comparative SFT vs DPO")
+    parser = argparse.ArgumentParser(
+        description="Évaluation comparative SFT vs DPO.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Note sur --eval-val :\n"
+            "  Le val set est utilisé pendant l'entraînement pour sélectionner le\n"
+            "  meilleur checkpoint (load_best_model_at_end=True). Les métriques val\n"
+            "  sont donc biaisées (le modèle a été optimisé sur ce split).\n"
+            "  Seul le test set fournit une estimation honnête des performances.\n"
+            "  --eval-val est utile uniquement pour debugger ou vérifier la cohérence\n"
+            "  avec les métriques du Trainer (~3h30 de GPU supplémentaires par modèle)."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="Logging DEBUG")
     parser.add_argument(
         "--n-eval", type=int, default=None,
@@ -474,6 +486,10 @@ def main() -> None:
     parser.add_argument(
         "--n-comparisons", type=int, default=N_EXAMPLES,
         help="Nombre de comparaisons qualitatives SFT vs DPO.",
+    )
+    parser.add_argument(
+        "--eval-val", action="store_true", default=False,
+        help="Évalue aussi sur le val set (biaisé — voir note ci-dessous). Désactivé par défaut.",
     )
     args = parser.parse_args()
 
@@ -499,16 +515,23 @@ def main() -> None:
     mlflow.enable_system_metrics_logging()
     with mlflow.start_run(run_name="eval-dpo"):
         # Chargement des données
-        df_val = pd.read_parquet(SFT_VAL_PATH)
         df_test = pd.read_parquet(SFT_TEST_PATH)
-        logger.info("Val: %d | Test: %d exemples SFT", len(df_val), len(df_test))
+        logger.info("Test: %d exemples SFT", len(df_test))
 
         # ── Évaluation SFT ────────────────────────────────────────────────────
         logger.info("Chargement du modèle SFT...")
         sft_model, sft_tokenizer = load_model(MODEL_NAME, SFT_CHECKPOINT)
 
-        logger.info("Évaluation SFT sur val...")
-        sft_val = evaluate_split(sft_model, sft_tokenizer, df_val, "sft-val", args.n_eval, logger)
+        # Évaluation val SFT (optionnelle — biaisée, désactivée par défaut)
+        sft_val = None
+        if args.eval_val:
+            logger.warning(
+                "--eval-val activé : le val set a servi à sélectionner le checkpoint "
+                "(load_best_model_at_end=True) — métriques biaisées, ~3h30 supplémentaires par modèle."
+            )
+            df_val = pd.read_parquet(SFT_VAL_PATH)
+            sft_val = evaluate_split(sft_model, sft_tokenizer, df_val, "sft-val", args.n_eval, logger)
+
         logger.info("Évaluation SFT sur test...")
         sft_test = evaluate_split(sft_model, sft_tokenizer, df_test, "sft-test", args.n_eval, logger)
 
@@ -518,8 +541,11 @@ def main() -> None:
             MODEL_NAME, SFT_CHECKPOINT, DPO_CHECKPOINT
         )
 
-        logger.info("Évaluation DPO sur val...")
-        dpo_val = evaluate_split(dpo_model, dpo_tokenizer, df_val, "dpo-val", args.n_eval, logger)
+        # Évaluation val DPO (optionnelle — même biais)
+        dpo_val = None
+        if args.eval_val:
+            dpo_val = evaluate_split(dpo_model, dpo_tokenizer, df_val, "dpo-val", args.n_eval, logger)
+
         logger.info("Évaluation DPO sur test...")
         dpo_test = evaluate_split(dpo_model, dpo_tokenizer, df_test, "dpo-test", args.n_eval, logger)
 
@@ -530,21 +556,27 @@ def main() -> None:
         )
 
         # ── Rapport ───────────────────────────────────────────────────────────
-        report = generate_dpo_eval_report(sft_val, dpo_val, sft_test, dpo_test, comparisons)
+        report = generate_dpo_eval_report(
+            sft_val or sft_test, dpo_val or dpo_test, sft_test, dpo_test, comparisons
+        )
         DPO_CHECKPOINT.mkdir(parents=True, exist_ok=True)
         REPORT_PATH.write_text(report, encoding="utf-8")
         logger.info("Rapport sauvegardé dans %s", REPORT_PATH)
 
-        mlflow.log_metrics({
-            "sft_val_accuracy": sft_val["accuracy"],
-            "sft_val_f1_macro": sft_val["f1_macro"],
-            "dpo_val_accuracy": dpo_val["accuracy"],
-            "dpo_val_f1_macro": dpo_val["f1_macro"],
-            "dpo_val_format_compliance": dpo_val["format_compliance"],
+        metrics_to_log = {
             "sft_test_accuracy": sft_test["accuracy"],
+            "sft_test_f1_macro": sft_test["f1_macro"],
             "dpo_test_accuracy": dpo_test["accuracy"],
-            "accuracy_delta": dpo_val["accuracy"] - sft_val["accuracy"],
-        })
+            "dpo_test_f1_macro": dpo_test["f1_macro"],
+            "dpo_test_format_compliance": dpo_test["format_compliance"],
+            "accuracy_delta": dpo_test["accuracy"] - sft_test["accuracy"],
+        }
+        if sft_val and dpo_val:
+            metrics_to_log.update({
+                "sft_val_accuracy": sft_val["accuracy"],
+                "dpo_val_accuracy": dpo_val["accuracy"],
+            })
+        mlflow.log_metrics(metrics_to_log)
         mlflow.log_artifact(str(REPORT_PATH))
 
     logger.info("=== Évaluation DPO terminée. ===")
