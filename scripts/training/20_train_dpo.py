@@ -76,6 +76,7 @@ MLFLOW_TRACKING_URI = str(PROJECT_ROOT / "mlruns")
 # ── Fonctions ─────────────────────────────────────────────────────────────────
 
 
+@mlflow.trace(span_type="RETRIEVER", name="load_sft_merged_with_dpo_lora")
 def load_sft_merged_with_dpo_lora(
     model_name: str,
     sft_checkpoint: Path,
@@ -129,6 +130,7 @@ def load_sft_merged_with_dpo_lora(
     return model, tokenizer
 
 
+@mlflow.trace(span_type="RETRIEVER", name="load_dpo_datasets")
 def load_dpo_datasets(
     train_path: Path,
     val_path: Path,

@@ -52,6 +52,7 @@ URGENCY_LABELS = ["max", "moderate", "deferred"]
 # ── Fonctions ─────────────────────────────────────────────────────────────────
 
 
+@mlflow.trace(span_type="RETRIEVER", name="load_finetuned_model")
 def load_finetuned_model(
     model_name: str,
     checkpoint_dir: Path,
@@ -106,33 +107,32 @@ def generate_response(
     Returns:
         Texte de la réponse générée, tronqué au premier <|im_end|>.
     """
-    prompt = format_chat_prompt(instruction, response="")
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    input_length = inputs["input_ids"].shape[1]
+    with mlflow.start_span(name="generate_response", span_type="LLM") as span:
+        span.set_inputs({"instruction": instruction[:300]})
 
-    # <|im_end|> est le token de fin de tour assistant en ChatML Qwen3.
-    # Sans eos_token_id explicite, le modèle peut continuer à générer
-    # un second tour "user/assistant" spurieux.
-    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        prompt = format_chat_prompt(instruction, response="")
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        input_length = inputs["input_ids"].shape[1]
 
-    with torch.no_grad():
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=DO_SAMPLE,
-            temperature=1.0,
-            eos_token_id=im_end_id,
-        )
+        im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
 
-    generated_ids = output_ids[0][input_length:]
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=DO_SAMPLE,
+                temperature=1.0,
+                eos_token_id=im_end_id,
+            )
 
-    # Tronquer au premier <|im_end|> comme filet de sécurité
-    # (au cas où eos_token_id n'aurait pas stoppé à temps)
-    eos_positions = (generated_ids == im_end_id).nonzero(as_tuple=True)[0]
-    if len(eos_positions) > 0:
-        generated_ids = generated_ids[:eos_positions[0]]
+        generated_ids = output_ids[0][input_length:]
+        eos_positions = (generated_ids == im_end_id).nonzero(as_tuple=True)[0]
+        if len(eos_positions) > 0:
+            generated_ids = generated_ids[:eos_positions[0]]
 
-    return tokenizer.decode(generated_ids, skip_special_tokens=True)
+        response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        span.set_outputs({"response": response[:300]})
+        return response
 
 
 def check_format_compliance(text: str) -> bool:
@@ -245,6 +245,15 @@ def evaluate_split(
             split_name, accuracy * 100, f1_macro, format_compliance * 100,
             n_unparseable, len(predictions),
         )
+
+    with mlflow.start_span(name=f"evaluate_split_{split_name}", span_type="CHAIN") as span:
+        span.set_inputs({"split": split_name, "n_evaluated": metrics["n_evaluated"]})
+        span.set_outputs({
+            "accuracy": metrics["accuracy"],
+            "f1_macro": metrics["f1_macro"],
+            "format_compliance": metrics["format_compliance"],
+            "n_unparseable": metrics["n_unparseable"],
+        })
 
     return metrics
 
@@ -384,36 +393,38 @@ def main() -> None:
             logger.error("Fichier manquant : %s", path)
             sys.exit(1)
 
-    # Chargement du modèle
-    logger.info("Chargement du modèle fine-tuné depuis %s...", CHECKPOINT_DIR)
-    model, tokenizer = load_finetuned_model(MODEL_NAME, CHECKPOINT_DIR, MAX_SEQ_LENGTH)
-    logger.info("Modèle chargé en mode inférence.")
-
-    # Chargement des données
-    df_val = pd.read_parquet(SFT_VAL_PATH)
-    df_test = pd.read_parquet(SFT_TEST_PATH)
-    logger.info("Val: %d exemples | Test: %d exemples", len(df_val), len(df_test))
-
-    # Évaluation
-    logger.info("Évaluation sur le val set...")
-    val_metrics = evaluate_split(model, tokenizer, df_val, "val", n_eval=args.n_eval, logger=logger)
-
-    logger.info("Évaluation sur le test set...")
-    test_metrics = evaluate_split(model, tokenizer, df_test, "test", n_eval=args.n_eval, logger=logger)
-
-    # Exemples
-    good_ex, bad_ex = sample_good_bad_examples(val_metrics["predictions"])
-
-    # Rapport
-    report = generate_eval_report(val_metrics, test_metrics, good_ex, bad_ex)
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(report, encoding="utf-8")
-    logger.info("Rapport d'évaluation sauvegardé dans %s", REPORT_PATH)
-
-    # MLflow
+    # Le start_run en début de main() rattache tous les spans @mlflow.trace
+    # et mlflow.start_span() au même run (évite les traces orphelines).
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
     with mlflow.start_run(run_name="eval-sft"):
+        # Chargement du modèle
+        logger.info("Chargement du modèle fine-tuné depuis %s...", CHECKPOINT_DIR)
+        model, tokenizer = load_finetuned_model(MODEL_NAME, CHECKPOINT_DIR, MAX_SEQ_LENGTH)
+        logger.info("Modèle chargé en mode inférence.")
+
+        # Chargement des données
+        df_val = pd.read_parquet(SFT_VAL_PATH)
+        df_test = pd.read_parquet(SFT_TEST_PATH)
+        logger.info("Val: %d exemples | Test: %d exemples", len(df_val), len(df_test))
+
+        # Évaluation
+        logger.info("Évaluation sur le val set...")
+        val_metrics = evaluate_split(model, tokenizer, df_val, "val", n_eval=args.n_eval, logger=logger)
+
+        logger.info("Évaluation sur le test set...")
+        test_metrics = evaluate_split(model, tokenizer, df_test, "test", n_eval=args.n_eval, logger=logger)
+
+        # Exemples
+        good_ex, bad_ex = sample_good_bad_examples(val_metrics["predictions"])
+
+        # Rapport
+        report = generate_eval_report(val_metrics, test_metrics, good_ex, bad_ex)
+        REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        REPORT_PATH.write_text(report, encoding="utf-8")
+        logger.info("Rapport d'évaluation sauvegardé dans %s", REPORT_PATH)
+
+        # Métriques + artefacts
         mlflow.log_metrics({
             "val_accuracy": val_metrics["accuracy"],
             "val_f1_macro": val_metrics["f1_macro"],

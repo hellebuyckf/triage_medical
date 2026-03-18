@@ -81,6 +81,7 @@ def _strip_artifacts(text: str) -> str:
 # ── Fonctions ─────────────────────────────────────────────────────────────────
 
 
+@mlflow.trace(span_type="RETRIEVER", name="load_model")
 def load_model(
     model_name: str,
     checkpoint_dir: Path,
@@ -112,6 +113,7 @@ def load_model(
     return model, tokenizer
 
 
+@mlflow.trace(span_type="RETRIEVER", name="load_sft_merged_for_dpo_eval")
 def load_sft_merged_for_dpo_eval(
     model_name: str,
     sft_checkpoint: Path,
@@ -170,38 +172,40 @@ def generate_response(
     Returns:
         Texte de la réponse générée (sans le prompt, tronqué au premier <|im_end|>).
     """
-    prompt = format_chat_prompt(instruction, response="")
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    input_length = inputs["input_ids"].shape[1]
+    with mlflow.start_span(name="generate_response", span_type="LLM") as span:
+        span.set_inputs({"instruction": instruction[:300]})
 
-    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    # Stop sur <|im_end|> ET sur le token EOS natif du tokenizer (évite les
-    # reprises hallucinées de conversation quand le modèle ne génère pas <|im_end|>)
-    stop_ids: list[int] = [im_end_id]
-    if tokenizer.eos_token_id is not None and tokenizer.eos_token_id != im_end_id:
-        stop_ids.append(tokenizer.eos_token_id)
+        prompt = format_chat_prompt(instruction, response="")
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        input_length = inputs["input_ids"].shape[1]
 
-    with torch.no_grad():
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=DO_SAMPLE,
-            temperature=1.0,
-            eos_token_id=stop_ids,
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-            repetition_penalty=1.1,
-        )
+        im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        stop_ids: list[int] = [im_end_id]
+        if tokenizer.eos_token_id is not None and tokenizer.eos_token_id != im_end_id:
+            stop_ids.append(tokenizer.eos_token_id)
 
-    generated_ids = output_ids[0][input_length:]
-    # Tronquer au premier token stop rencontré
-    for stop_id in stop_ids:
-        positions = (generated_ids == stop_id).nonzero(as_tuple=True)[0]
-        if len(positions) > 0:
-            generated_ids = generated_ids[: positions[0]]
-            break
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=DO_SAMPLE,
+                temperature=1.0,
+                eos_token_id=stop_ids,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+                repetition_penalty=1.1,
+            )
 
-    text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-    return _strip_artifacts(text)
+        generated_ids = output_ids[0][input_length:]
+        for stop_id in stop_ids:
+            positions = (generated_ids == stop_id).nonzero(as_tuple=True)[0]
+            if len(positions) > 0:
+                generated_ids = generated_ids[: positions[0]]
+                break
+
+        text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        response = _strip_artifacts(text)
+        span.set_outputs({"response": response[:300]})
+        return response
 
 
 def check_format_compliance(text: str) -> bool:
@@ -300,6 +304,16 @@ def evaluate_split(
             n_unparseable,
             len(predictions),
         )
+
+    with mlflow.start_span(name=f"evaluate_split_{split_name}", span_type="CHAIN") as span:
+        span.set_inputs({"split": split_name, "n_evaluated": metrics["n_evaluated"]})
+        span.set_outputs({
+            "accuracy": metrics["accuracy"],
+            "f1_macro": metrics["f1_macro"],
+            "format_compliance": metrics["format_compliance"],
+            "n_unparseable": metrics["n_unparseable"],
+        })
+
     return metrics
 
 
@@ -475,47 +489,48 @@ def main() -> None:
             logger.error("Fichier manquant : %s", path)
             sys.exit(1)
 
-    # Chargement des données
-    df_val = pd.read_parquet(SFT_VAL_PATH)
-    df_test = pd.read_parquet(SFT_TEST_PATH)
-    logger.info("Val: %d | Test: %d exemples SFT", len(df_val), len(df_test))
-
-    # ── Évaluation SFT ────────────────────────────────────────────────────────
-    logger.info("Chargement du modèle SFT...")
-    sft_model, sft_tokenizer = load_model(MODEL_NAME, SFT_CHECKPOINT)
-
-    logger.info("Évaluation SFT sur val...")
-    sft_val = evaluate_split(sft_model, sft_tokenizer, df_val, "sft-val", args.n_eval, logger)
-    logger.info("Évaluation SFT sur test...")
-    sft_test = evaluate_split(sft_model, sft_tokenizer, df_test, "sft-test", args.n_eval, logger)
-
-    # ── Évaluation DPO ────────────────────────────────────────────────────────
-    logger.info("Chargement du modèle DPO (base + SFT merged + DPO LoRA)...")
-    dpo_model, dpo_tokenizer = load_sft_merged_for_dpo_eval(
-        MODEL_NAME, SFT_CHECKPOINT, DPO_CHECKPOINT
-    )
-
-    logger.info("Évaluation DPO sur val...")
-    dpo_val = evaluate_split(dpo_model, dpo_tokenizer, df_val, "dpo-val", args.n_eval, logger)
-    logger.info("Évaluation DPO sur test...")
-    dpo_test = evaluate_split(dpo_model, dpo_tokenizer, df_test, "dpo-test", args.n_eval, logger)
-
-    # ── Comparaisons qualitatives ─────────────────────────────────────────────
-    logger.info("Génération de %d comparaisons qualitatives SFT vs DPO...", args.n_comparisons)
-    comparisons = compare_responses_on_dpo_val(
-        sft_model, dpo_model, sft_tokenizer, DPO_VAL_PATH, n=args.n_comparisons
-    )
-
-    # ── Rapport ───────────────────────────────────────────────────────────────
-    report = generate_dpo_eval_report(sft_val, dpo_val, sft_test, dpo_test, comparisons)
-    DPO_CHECKPOINT.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(report, encoding="utf-8")
-    logger.info("Rapport sauvegardé dans %s", REPORT_PATH)
-
-    # MLflow
+    # Le start_run en début de main() rattache tous les spans @mlflow.trace
+    # et mlflow.start_span() au même run (évite les traces orphelines).
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
     with mlflow.start_run(run_name="eval-dpo"):
+        # Chargement des données
+        df_val = pd.read_parquet(SFT_VAL_PATH)
+        df_test = pd.read_parquet(SFT_TEST_PATH)
+        logger.info("Val: %d | Test: %d exemples SFT", len(df_val), len(df_test))
+
+        # ── Évaluation SFT ────────────────────────────────────────────────────
+        logger.info("Chargement du modèle SFT...")
+        sft_model, sft_tokenizer = load_model(MODEL_NAME, SFT_CHECKPOINT)
+
+        logger.info("Évaluation SFT sur val...")
+        sft_val = evaluate_split(sft_model, sft_tokenizer, df_val, "sft-val", args.n_eval, logger)
+        logger.info("Évaluation SFT sur test...")
+        sft_test = evaluate_split(sft_model, sft_tokenizer, df_test, "sft-test", args.n_eval, logger)
+
+        # ── Évaluation DPO ────────────────────────────────────────────────────
+        logger.info("Chargement du modèle DPO (base + SFT merged + DPO LoRA)...")
+        dpo_model, dpo_tokenizer = load_sft_merged_for_dpo_eval(
+            MODEL_NAME, SFT_CHECKPOINT, DPO_CHECKPOINT
+        )
+
+        logger.info("Évaluation DPO sur val...")
+        dpo_val = evaluate_split(dpo_model, dpo_tokenizer, df_val, "dpo-val", args.n_eval, logger)
+        logger.info("Évaluation DPO sur test...")
+        dpo_test = evaluate_split(dpo_model, dpo_tokenizer, df_test, "dpo-test", args.n_eval, logger)
+
+        # ── Comparaisons qualitatives ─────────────────────────────────────────
+        logger.info("Génération de %d comparaisons qualitatives SFT vs DPO...", args.n_comparisons)
+        comparisons = compare_responses_on_dpo_val(
+            sft_model, dpo_model, sft_tokenizer, DPO_VAL_PATH, n=args.n_comparisons
+        )
+
+        # ── Rapport ───────────────────────────────────────────────────────────
+        report = generate_dpo_eval_report(sft_val, dpo_val, sft_test, dpo_test, comparisons)
+        DPO_CHECKPOINT.mkdir(parents=True, exist_ok=True)
+        REPORT_PATH.write_text(report, encoding="utf-8")
+        logger.info("Rapport sauvegardé dans %s", REPORT_PATH)
+
         mlflow.log_metrics({
             "sft_val_accuracy": sft_val["accuracy"],
             "sft_val_f1_macro": sft_val["f1_macro"],

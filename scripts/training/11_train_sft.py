@@ -58,6 +58,7 @@ MLFLOW_TRACKING_URI = str(PROJECT_ROOT / "mlruns")
 # ── Fonctions ─────────────────────────────────────────────────────────────────
 
 
+@mlflow.trace(span_type="RETRIEVER", name="load_model_and_tokenizer")
 def load_model_and_tokenizer(
     model_name: str,
     max_seq_length: int,
