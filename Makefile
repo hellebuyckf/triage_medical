@@ -1,7 +1,7 @@
 .PHONY: all setup download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
         dpo-pipeline train-dpo evaluate-dpo export-model \
-        mlflow mlflow-build mlflow-up mlflow-down mlflow-logs \
+        mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow \
         clean clean-all help
 
 # Variables
@@ -107,6 +107,10 @@ mlflow-logs:
 # Alias pratique : build + up en une commande
 mlflow: mlflow-build mlflow-up
 
+# Supprime tous les runs MLflow (mlruns/)
+clean-mlflow:
+	rm -rf mlruns/
+
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 
 # Nettoyage des fichiers intermédiaires (raw et processed)
@@ -151,6 +155,7 @@ help:
 	@echo "  make mlflow-up         — démarre le conteneur (port 127.0.0.1:5000)"
 	@echo "  make mlflow-down       — arrête et supprime le conteneur"
 	@echo "  make mlflow-logs       — affiche les logs du conteneur"
+	@echo "  make clean-mlflow      — supprime tous les runs MLflow (mlruns/)"
 	@echo ""
 	@echo "  Nettoyage"
 	@echo "  make clean             — supprime raw/ et processed/"
