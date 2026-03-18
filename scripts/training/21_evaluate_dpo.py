@@ -110,6 +110,7 @@ def load_model(
     )
     model = PeftModel.from_pretrained(base, str(checkpoint_dir))
     model.eval()
+    model.generation_config.max_length = None
     return model, tokenizer
 
 
@@ -152,6 +153,7 @@ def load_sft_merged_for_dpo_eval(
     # 3. Appliquer le LoRA DPO
     model = PeftModel.from_pretrained(model, str(dpo_checkpoint))
     model.eval()
+    model.generation_config.max_length = None
     return model, tokenizer
 
 

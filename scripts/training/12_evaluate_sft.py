@@ -83,6 +83,9 @@ def load_finetuned_model(
     )
     model = PeftModel.from_pretrained(model, str(checkpoint_dir))
     model.eval()
+    # Supprime le max_length de la generation_config (Qwen3 le fixe à 32768),
+    # ce qui crée un warning quand max_new_tokens est aussi passé à generate().
+    model.generation_config.max_length = None
     return model, tokenizer
 
 
