@@ -397,6 +397,8 @@ def main() -> None:
     # et mlflow.start_span() au même run (évite les traces orphelines).
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
+    # System metrics : CPU, RAM, GPU utilization + VRAM (nécessite pynvml)
+    mlflow.enable_system_metrics_logging()
     with mlflow.start_run(run_name="eval-sft"):
         # Chargement du modèle
         logger.info("Chargement du modèle fine-tuné depuis %s...", CHECKPOINT_DIR)

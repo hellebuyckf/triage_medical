@@ -232,6 +232,9 @@ def main() -> None:
     # Configuration MLflow
     setup_mlflow()
 
+    # System metrics : CPU, RAM, GPU utilization + VRAM (nécessite pynvml)
+    mlflow.enable_system_metrics_logging()
+
     # Le start_run explicite garantit que le callback HuggingFace utilise ce run
     # pour les métriques de steps (loss curves) au lieu de créer un nested run.
     with mlflow.start_run(run_name="sft-qwen3-1.7b-triage"):

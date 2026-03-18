@@ -271,6 +271,9 @@ def main() -> None:
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
+    # System metrics : CPU, RAM, GPU utilization + VRAM (nécessite pynvml)
+    mlflow.enable_system_metrics_logging()
+
     # Le start_run explicite garantit que le callback HuggingFace utilise ce run
     # pour les métriques de steps (loss curves) au lieu de créer un nested run.
     with mlflow.start_run(run_name="dpo-qwen3-1.7b-triage"):
