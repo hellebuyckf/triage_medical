@@ -1,7 +1,7 @@
 .PHONY: all setup download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
         dpo-pipeline train-dpo evaluate-dpo export-model \
-        clean clean-all help
+        mlflow clean clean-all help
 
 # Variables
 PYTHON   = uv run python
@@ -73,6 +73,11 @@ evaluate-dpo: train-dpo
 export-model: evaluate-dpo
 	$(PYTHON) $(TRAINING)/22_export_model.py
 
+# ── MLflow ────────────────────────────────────────────────────────────────────
+
+mlflow:
+	uv run mlflow ui --backend-store-uri mlruns --port 5000
+
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 
 # Nettoyage des fichiers intermédiaires (raw et processed)
@@ -110,6 +115,9 @@ help:
 	@echo "  make train-dpo         — alignement DPO LoRA"
 	@echo "  make evaluate-dpo      — évaluation SFT vs DPO + rapport"
 	@echo "  make export-model      — fusion LoRA + export format HuggingFace"
+	@echo ""
+	@echo "  MLflow"
+	@echo "  make mlflow            — lance l'UI MLflow sur http://localhost:5000"
 	@echo ""
 	@echo "  Nettoyage"
 	@echo "  make clean             — supprime raw/ et processed/"
