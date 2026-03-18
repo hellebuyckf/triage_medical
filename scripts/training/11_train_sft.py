@@ -52,7 +52,7 @@ GRAD_ACCUM = 4
 SEED = 42
 
 MLFLOW_EXPERIMENT = "sft-qwen3-1.7b-triage"
-MLFLOW_TRACKING_URI = str(PROJECT_ROOT / "mlruns")
+MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
 
 
 # ── Fonctions ─────────────────────────────────────────────────────────────────

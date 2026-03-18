@@ -81,6 +81,7 @@ mlflow-up:
 	docker run -d \
 		--name $(MLFLOW_CONTAINER) \
 		-p 127.0.0.1:5000:5000 \
+		-v $(PWD)/mlflow.db:/mlflow.db:ro \
 		-v $(PWD)/mlruns:/mlruns:ro \
 		--restart unless-stopped \
 		$(MLFLOW_IMAGE)
@@ -93,7 +94,7 @@ mlflow-logs:
 	docker logs -f $(MLFLOW_CONTAINER)
 
 clean-mlflow:
-	rm -rf mlruns/
+	rm -rf mlruns/ mlflow.db
 
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 

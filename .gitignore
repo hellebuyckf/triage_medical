@@ -178,6 +178,8 @@ data/final/
 data/raw/
 data/processed/
 data/annotation/
+mlruns/
+mlflow.db
 __pycache__/
 .venv/
 *.pyc

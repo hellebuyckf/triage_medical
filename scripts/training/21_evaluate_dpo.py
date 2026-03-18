@@ -55,7 +55,7 @@ SEED = 42
 URGENCY_LABELS = ["max", "moderate", "deferred"]
 
 MLFLOW_EXPERIMENT = "dpo-qwen3-1.7b-triage"
-MLFLOW_TRACKING_URI = str(PROJECT_ROOT / "mlruns")
+MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
 
 # Regex pour supprimer les artifacts de génération Qwen3 :
 # - ForCanBeConverted, 𫟦, caractères de remplacement Unicode (U+FFFD)
