@@ -9,7 +9,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pandas as pd
-from datasets import load_from_disk
+from datasets import Dataset, load_from_disk
 from tqdm import tqdm
 
 from utils import (
@@ -23,7 +23,7 @@ from utils import (
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 RAW_DIR = PROJECT_ROOT / "data" / "raw"
-OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "sft_raw.parquet"
+OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "sft_raw"
 
 
 # ── Transformations par source ───────────────────────────────────────────────
@@ -260,14 +260,14 @@ def main() -> None:
 
     if OUTPUT_PATH.exists():
         logger.info(f"Dataset SFT déjà construit dans {OUTPUT_PATH}, skip.")
-        df = pd.read_parquet(OUTPUT_PATH)
+        df = load_from_disk(str(OUTPUT_PATH)).to_pandas()
         logger.info(f"  {len(df)} exemples, distribution : {df['urgency_level'].value_counts().to_dict()}")
         return
 
     df = build_sft(logger)
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(OUTPUT_PATH, index=False)
+    Dataset.from_pandas(df).save_to_disk(str(OUTPUT_PATH))
     logger.info(f"SFT dataset: {len(df)} exemples sauvegardés dans {OUTPUT_PATH}.")
     logger.info(f"  Urgency: {df['urgency_level'].value_counts().to_string()}")
     logger.info(f"  Source:  {df['source'].value_counts().to_string()}")

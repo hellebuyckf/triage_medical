@@ -16,7 +16,7 @@ from utils import DPO_COLUMNS, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 RAW_DIR = PROJECT_ROOT / "data" / "raw" / "ultramedical_preference"
-OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "dpo_raw.parquet"
+OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "dpo_raw"
 
 
 def extract_assistant_text(messages: list[dict]) -> str:
@@ -88,7 +88,7 @@ def main() -> None:
 
     if OUTPUT_PATH.exists():
         logger.info(f"Dataset DPO déjà construit dans {OUTPUT_PATH}, skip.")
-        df = pd.read_parquet(OUTPUT_PATH)
+        df = load_from_disk(str(OUTPUT_PATH)).to_pandas()
         logger.info(f"  {len(df)} paires.")
         return
 
@@ -122,7 +122,7 @@ def main() -> None:
     df = pd.DataFrame(rows, columns=DPO_COLUMNS)
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(OUTPUT_PATH, index=False)
+    Dataset.from_pandas(df).save_to_disk(str(OUTPUT_PATH))
     logger.info(f"DPO dataset: {len(df)} paires sauvegardées dans {OUTPUT_PATH}.")
 
 

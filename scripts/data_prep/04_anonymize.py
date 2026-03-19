@@ -11,6 +11,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pandas as pd
+from datasets import Dataset, load_from_disk
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
@@ -20,10 +21,10 @@ from utils import filter_presidio_false_positives, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
-SFT_INPUT = PROCESSED_DIR / "sft_raw.parquet"
-DPO_INPUT = PROCESSED_DIR / "dpo_raw.parquet"
-SFT_OUTPUT = PROCESSED_DIR / "sft_anonymized.parquet"
-DPO_OUTPUT = PROCESSED_DIR / "dpo_anonymized.parquet"
+SFT_INPUT = PROCESSED_DIR / "sft_raw"
+DPO_INPUT = PROCESSED_DIR / "dpo_raw"
+SFT_OUTPUT = PROCESSED_DIR / "sft_anonymized"
+DPO_OUTPUT = PROCESSED_DIR / "dpo_anonymized"
 RGPD_REPORT = PROCESSED_DIR / "rgpd_report.md"
 
 ENTITIES = [
@@ -294,16 +295,16 @@ def main() -> None:
 
     # SFT
     logger.info("Anonymisation du dataset SFT...")
-    df_sft = pd.read_parquet(SFT_INPUT)
+    df_sft = load_from_disk(str(SFT_INPUT)).to_pandas()
     df_sft_anon, sft_stats = anonymize_sft_dataset(df_sft, analyzer, anonymizer, logger)
-    df_sft_anon.to_parquet(SFT_OUTPUT, index=False)
+    Dataset.from_pandas(df_sft_anon).save_to_disk(str(SFT_OUTPUT))
     logger.info(f"SFT anonymisé: {sft_stats['rows_with_pii']} lignes avec PII, {sft_stats['total_entities_found']} entités masquées.")
 
     # DPO
     logger.info("Anonymisation du dataset DPO...")
-    df_dpo = pd.read_parquet(DPO_INPUT)
+    df_dpo = load_from_disk(str(DPO_INPUT)).to_pandas()
     df_dpo_anon, dpo_stats = anonymize_dpo_dataset(df_dpo, analyzer, anonymizer, logger)
-    df_dpo_anon.to_parquet(DPO_OUTPUT, index=False)
+    Dataset.from_pandas(df_dpo_anon).save_to_disk(str(DPO_OUTPUT))
     logger.info(f"DPO anonymisé: {dpo_stats['rows_with_pii']} lignes avec PII, {dpo_stats['total_entities_found']} entités masquées.")
 
     # Rapport RGPD

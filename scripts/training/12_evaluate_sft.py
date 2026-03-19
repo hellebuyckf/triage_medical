@@ -21,6 +21,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import mlflow
 import pandas as pd
 import torch
+from datasets import load_from_disk
 from peft import PeftModel
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from tqdm import tqdm
@@ -34,8 +35,7 @@ PROJECT_ROOT = _SCRIPTS_DIR.parent
 
 MODEL_NAME = "unsloth/Qwen3-1.7B-Base"
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "sft"
-SFT_VAL_PATH = PROJECT_ROOT / "data" / "final" / "sft_val.parquet"
-SFT_TEST_PATH = PROJECT_ROOT / "data" / "final" / "sft_test.parquet"
+SFT_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "sft"
 REPORT_PATH = CHECKPOINT_DIR / "eval_report.md"
 
 MAX_SEQ_LENGTH = 1024
@@ -414,11 +414,10 @@ def main() -> None:
         logger.error("Checkpoint LoRA non trouvé : %s. Lancer 11_train_sft.py d'abord.", adapter_path)
         sys.exit(1)
 
-    # Vérification des fichiers de données
-    for path in [SFT_VAL_PATH, SFT_TEST_PATH]:
-        if not path.exists():
-            logger.error("Fichier manquant : %s", path)
-            sys.exit(1)
+    # Vérification du dataset
+    if not SFT_FINAL_DIR.exists():
+        logger.error("Dataset manquant : %s", SFT_FINAL_DIR)
+        sys.exit(1)
 
     # Le start_run en début de main() rattache tous les spans @mlflow.trace
     # et mlflow.start_span() au même run (évite les traces orphelines).
@@ -433,7 +432,8 @@ def main() -> None:
         logger.info("Modèle chargé en mode inférence.")
 
         # Chargement des données
-        df_test = pd.read_parquet(SFT_TEST_PATH)
+        sft = load_from_disk(str(SFT_FINAL_DIR))
+        df_test = sft["test"].to_pandas()
         logger.info("Test: %d exemples", len(df_test))
 
         # Évaluation val (optionnelle — biaisée, désactivée par défaut)
@@ -443,7 +443,7 @@ def main() -> None:
                 "--eval-val activé : le val set a servi à sélectionner le checkpoint "
                 "(load_best_model_at_end=True) — métriques biaisées, ~3h30 supplémentaires."
             )
-            df_val = pd.read_parquet(SFT_VAL_PATH)
+            df_val = sft["val"].to_pandas()
             val_metrics = evaluate_split(model, tokenizer, df_val, "val", n_eval=args.n_eval, logger=logger)
 
         # Évaluation test (référence honnête)

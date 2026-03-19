@@ -4,6 +4,7 @@ Usage:
     uv run python scripts/explore_data.py            # interactive SQL shell
     uv run python scripts/explore_data.py --stats    # print stats and exit
     uv run python scripts/explore_data.py --query "SELECT * FROM sft_train LIMIT 5"
+    (views: sft_train, sft_val, sft_test, dpo_train, dpo_val, sft_raw, dpo_raw, ...)
 """
 
 import argparse
@@ -12,6 +13,7 @@ from pathlib import Path
 import duckdb
 import pyarrow as pa
 import pyarrow.ipc as ipc
+from datasets import load_from_disk
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -21,20 +23,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = PROJECT_ROOT / "data" / "explore.duckdb"
 
-# Map of DuckDB view name -> Parquet file path(s)
-# Glob patterns let us handle multi-file datasets if needed.
-DATASETS: dict[str, list[Path]] = {
-    # --- Final (anonymized, split) ---
-    "sft_train": [DATA_DIR / "final" / "sft_train.parquet"],
-    "sft_val": [DATA_DIR / "final" / "sft_val.parquet"],
-    "sft_test": [DATA_DIR / "final" / "sft_test.parquet"],
-    "dpo_train": [DATA_DIR / "final" / "dpo_train.parquet"],
-    "dpo_val": [DATA_DIR / "final" / "dpo_val.parquet"],
-    # --- Processed (before final split) ---
-    "sft_raw": [DATA_DIR / "processed" / "sft_raw.parquet"],
-    "dpo_raw": [DATA_DIR / "processed" / "dpo_raw.parquet"],
-    "sft_anonymized": [DATA_DIR / "processed" / "sft_anonymized.parquet"],
-    "dpo_anonymized": [DATA_DIR / "processed" / "dpo_anonymized.parquet"],
+# HuggingFace DatasetDict views: view_prefix -> DatasetDict path.
+# Each split (train/val/test) becomes a separate DuckDB view: {prefix}_{split}.
+HF_DICT_DATASETS: dict[str, Path] = {
+    "sft": DATA_DIR / "final" / "sft",
+    "dpo": DATA_DIR / "final" / "dpo",
+}
+
+# HuggingFace Dataset (single split) views: view_name -> Dataset path.
+HF_SINGLE_DATASETS: dict[str, Path] = {
+    "sft_raw": DATA_DIR / "processed" / "sft_raw",
+    "dpo_raw": DATA_DIR / "processed" / "dpo_raw",
+    "sft_anonymized": DATA_DIR / "processed" / "sft_anonymized",
+    "dpo_anonymized": DATA_DIR / "processed" / "dpo_anonymized",
 }
 
 # Raw HuggingFace Arrow IPC streams: view_name -> list of .arrow shard paths.
@@ -82,9 +83,9 @@ def _load_arrow_shards(paths: list[Path]) -> pa.Table | None:
 def build_connection() -> duckdb.DuckDBPyConnection:
     """Open (or create) the persistent DuckDB file and register all views.
 
-    Parquet files are registered as SQL views via read_parquet().
-    Raw Arrow IPC streams are loaded into memory via pyarrow and registered
-    as in-memory relations (they survive for the lifetime of the connection).
+    HuggingFace DatasetDict and Dataset directories are loaded via load_from_disk()
+    and registered as in-memory pyarrow relations.
+    Raw Arrow IPC streams are loaded via pyarrow and registered similarly.
 
     Returns:
         An open DuckDB connection with all dataset views registered.
@@ -94,17 +95,23 @@ def build_connection() -> duckdb.DuckDBPyConnection:
     registered: list[str] = []
     skipped: list[str] = []
 
-    # --- Parquet views (final + processed) ---
-    for view_name, paths in DATASETS.items():
-        existing = [p for p in paths if p.exists()]
-        if not existing:
+    # --- HuggingFace DatasetDict (final splits) ---
+    for prefix, path in HF_DICT_DATASETS.items():
+        if not path.exists():
+            skipped.append(prefix)
+            continue
+        dataset_dict = load_from_disk(str(path))
+        for split_name, split_ds in dataset_dict.items():
+            view_name = f"{prefix}_{split_name}"
+            con.register(view_name, split_ds.to_arrow())
+            registered.append(view_name)
+
+    # --- HuggingFace Dataset (single, processed) ---
+    for view_name, path in HF_SINGLE_DATASETS.items():
+        if not path.exists():
             skipped.append(view_name)
             continue
-        files_expr = ", ".join(f"'{p}'" for p in existing)
-        con.execute(
-            f"CREATE OR REPLACE VIEW {view_name} AS "
-            f"SELECT * FROM read_parquet([{files_expr}])"
-        )
+        con.register(view_name, load_from_disk(str(path)).to_arrow())
         registered.append(view_name)
 
     # --- Raw Arrow IPC streams ---

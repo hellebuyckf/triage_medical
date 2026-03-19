@@ -22,6 +22,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 import mlflow
 import pandas as pd
+from datasets import load_from_disk
 from peft import PeftModel
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from tqdm import tqdm
@@ -43,9 +44,8 @@ SFT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "sft"
 DPO_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "dpo"
 REPORT_PATH = DPO_CHECKPOINT / "eval_report.md"
 
-SFT_VAL_PATH = PROJECT_ROOT / "data" / "final" / "sft_val.parquet"
-SFT_TEST_PATH = PROJECT_ROOT / "data" / "final" / "sft_test.parquet"
-DPO_VAL_PATH = PROJECT_ROOT / "data" / "final" / "dpo_val.parquet"
+SFT_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "sft"
+DPO_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "dpo"
 
 MAX_SEQ_LENGTH = 1024
 MAX_NEW_TOKENS = 512
@@ -340,14 +340,15 @@ def compare_responses_on_dpo_val(
         sft_model: Modèle SFT.
         dpo_model: Modèle DPO.
         tokenizer: Tokenizer partagé.
-        dpo_val_path: Chemin vers dpo_val.parquet.
+        dpo_val_path: Répertoire du DatasetDict DPO (contient le split val).
         n: Nombre de comparaisons à générer.
         seed: Graine pour le sous-échantillonnage.
 
     Returns:
         Liste de dicts {prompt, sft_response, dpo_response}.
     """
-    df = pd.read_parquet(dpo_val_path).sample(n=min(n, 100), random_state=seed).head(n)
+    dpo = load_from_disk(str(dpo_val_path))
+    df = dpo["val"].to_pandas().sample(n=min(n, 100), random_state=seed).head(n)
     comparisons = []
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Comparaisons SFT vs DPO"):
         prompt = row["prompt"]
@@ -506,9 +507,9 @@ def main() -> None:
             logger.error("Checkpoint manquant : %s", path)
             sys.exit(1)
 
-    for path in [SFT_VAL_PATH, SFT_TEST_PATH, DPO_VAL_PATH]:
+    for path in [SFT_FINAL_DIR, DPO_FINAL_DIR]:
         if not path.exists():
-            logger.error("Fichier manquant : %s", path)
+            logger.error("Dataset manquant : %s", path)
             sys.exit(1)
 
     # Le start_run en début de main() rattache tous les spans @mlflow.trace
@@ -519,7 +520,8 @@ def main() -> None:
     mlflow.enable_system_metrics_logging()
     with mlflow.start_run(run_name="eval-dpo"):
         # Chargement des données
-        df_test = pd.read_parquet(SFT_TEST_PATH)
+        sft = load_from_disk(str(SFT_FINAL_DIR))
+        df_test = sft["test"].to_pandas()
         logger.info("Test: %d exemples SFT", len(df_test))
 
         # ── Évaluation SFT ────────────────────────────────────────────────────
@@ -533,7 +535,7 @@ def main() -> None:
                 "--eval-val activé : le val set a servi à sélectionner le checkpoint "
                 "(load_best_model_at_end=True) — métriques biaisées, ~3h30 supplémentaires par modèle."
             )
-            df_val = pd.read_parquet(SFT_VAL_PATH)
+            df_val = sft["val"].to_pandas()
             sft_val = evaluate_split(sft_model, sft_tokenizer, df_val, "sft-val", args.n_eval, logger)
 
         logger.info("Évaluation SFT sur test...")
@@ -548,6 +550,7 @@ def main() -> None:
         # Évaluation val DPO (optionnelle — même biais)
         dpo_val = None
         if args.eval_val:
+            df_val = sft["val"].to_pandas()
             dpo_val = evaluate_split(dpo_model, dpo_tokenizer, df_val, "dpo-val", args.n_eval, logger)
 
         logger.info("Évaluation DPO sur test...")
@@ -556,7 +559,7 @@ def main() -> None:
         # ── Comparaisons qualitatives ─────────────────────────────────────────
         logger.info("Génération de %d comparaisons qualitatives SFT vs DPO...", args.n_comparisons)
         comparisons = compare_responses_on_dpo_val(
-            sft_model, dpo_model, sft_tokenizer, DPO_VAL_PATH, n=args.n_comparisons
+            sft_model, dpo_model, sft_tokenizer, DPO_FINAL_DIR, n=args.n_comparisons
         )
 
         # ── Rapport ───────────────────────────────────────────────────────────

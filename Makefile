@@ -1,6 +1,7 @@
 .PHONY: all setup download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
         dpo-pipeline train-dpo evaluate-dpo export-model \
+        push-datasets push-datasets-all \
         mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow \
         clean clean-sft clean-dpo clean-all help
 
@@ -10,6 +11,13 @@ DATA_PREP       = scripts/data_prep
 TRAINING        = scripts/training
 MLFLOW_IMAGE    = project14-mlflow
 MLFLOW_CONTAINER = project14-mlflow
+
+# HuggingFace Hub
+# Usage : make push-datasets HF_USERNAME=johndoe
+# Ou    : export HF_USERNAME=johndoe && make push-datasets
+HF_USERNAME     ?= $(shell echo $$HF_USERNAME)
+HF_PRIVATE      ?= 0
+_HF_PRIVATE_FLAG = $(if $(filter 1,$(HF_PRIVATE)),--private,)
 
 # Evaluation options
 # Set EVAL_VAL=1 to also evaluate on the val set (biased — model was selected on val loss).
@@ -71,6 +79,29 @@ evaluate-dpo: train-dpo
 
 export-model: evaluate-dpo
 	$(PYTHON) $(TRAINING)/22_export_model.py
+
+# ── HuggingFace Hub ───────────────────────────────────────────────────────────
+
+push-datasets: split
+	@if [ -z "$(HF_USERNAME)" ]; then \
+		echo "Erreur : HF_USERNAME non défini."; \
+		echo "Usage  : make push-datasets HF_USERNAME=<votre_username>"; \
+		exit 1; \
+	fi
+	$(PYTHON) $(DATA_PREP)/06_push_to_hub.py \
+		--username $(HF_USERNAME) \
+		$(_HF_PRIVATE_FLAG)
+
+push-datasets-all: split
+	@if [ -z "$(HF_USERNAME)" ]; then \
+		echo "Erreur : HF_USERNAME non défini."; \
+		echo "Usage  : make push-datasets-all HF_USERNAME=<votre_username>"; \
+		exit 1; \
+	fi
+	$(PYTHON) $(DATA_PREP)/06_push_to_hub.py \
+		--username $(HF_USERNAME) \
+		--include-processed \
+		$(_HF_PRIVATE_FLAG)
 
 # ── MLflow ────────────────────────────────────────────────────────────────────
 #
@@ -145,6 +176,11 @@ help:
 	@echo "  make evaluate-dpo      — évaluation SFT vs DPO sur test set (honnête)"
 	@echo "  make evaluate-dpo EVAL_VAL=1  — idem + val set (biaisé, désactivé par défaut)"
 	@echo "  make export-model      — fusion LoRA + export format HuggingFace"
+	@echo ""
+	@echo "  HuggingFace Hub"
+	@echo "  make push-datasets HF_USERNAME=<user>      — publie sft + dpo finaux (DatasetDict)"
+	@echo "  make push-datasets-all HF_USERNAME=<user>  — idem + datasets intermédiaires"
+	@echo "  make push-datasets HF_USERNAME=<user> HF_PRIVATE=1  — dépôts privés"
 	@echo ""
 	@echo "  MLflow"
 	@echo "  make mlflow            — build + démarre le conteneur MLflow"

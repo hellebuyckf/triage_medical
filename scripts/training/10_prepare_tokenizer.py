@@ -11,7 +11,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pandas as pd
-from datasets import Dataset
+from datasets import Dataset, load_from_disk
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from utils import SYSTEM_PROMPT, format_chat_prompt, get_logger
@@ -23,9 +23,7 @@ PROJECT_ROOT = _SCRIPTS_DIR.parent
 MODEL_NAME = "unsloth/Qwen3-1.7B-Base"
 MAX_SEQ_LENGTH = 1024
 
-SFT_TRAIN_PATH = PROJECT_ROOT / "data" / "final" / "sft_train.parquet"
-SFT_VAL_PATH = PROJECT_ROOT / "data" / "final" / "sft_val.parquet"
-SFT_TEST_PATH = PROJECT_ROOT / "data" / "final" / "sft_test.parquet"
+SFT_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "sft"
 TOKENIZED_DIR = PROJECT_ROOT / "data" / "processed" / "sft_tokenized"
 
 CHAT_MARKER = "<|im_start|>assistant\n"
@@ -135,11 +133,10 @@ def main() -> None:
         logger.info("Datasets tokenisés déjà présents dans %s — skip.", TOKENIZED_DIR)
         return
 
-    # Vérification des fichiers source
-    for path in [SFT_TRAIN_PATH, SFT_VAL_PATH, SFT_TEST_PATH]:
-        if not path.exists():
-            logger.error("Fichier manquant : %s. Lancer le pipeline S1 d'abord.", path)
-            sys.exit(1)
+    # Vérification du dataset source
+    if not SFT_FINAL_DIR.exists():
+        logger.error("Dataset manquant : %s. Lancer le pipeline S1 d'abord.", SFT_FINAL_DIR)
+        sys.exit(1)
 
     # Chargement du tokenizer
     logger.info("Chargement du tokenizer depuis %s...", MODEL_NAME)
@@ -147,10 +144,11 @@ def main() -> None:
     logger.info("Tokenizer chargé. Vocab size : %d, pad_token : '%s'", tokenizer.vocab_size, tokenizer.pad_token)
 
     # Chargement des splits
-    logger.info("Chargement des splits Parquet...")
-    df_train = pd.read_parquet(SFT_TRAIN_PATH)
-    df_val = pd.read_parquet(SFT_VAL_PATH)
-    df_test = pd.read_parquet(SFT_TEST_PATH)
+    logger.info("Chargement des splits depuis %s...", SFT_FINAL_DIR)
+    sft = load_from_disk(str(SFT_FINAL_DIR))
+    df_train = sft["train"].to_pandas()
+    df_val = sft["val"].to_pandas()
+    df_test = sft["test"].to_pandas()
     logger.info("  train: %d | val: %d | test: %d", len(df_train), len(df_val), len(df_test))
 
     # Analyse des longueurs sur le train set

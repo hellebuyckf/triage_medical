@@ -11,6 +11,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pandas as pd
+from datasets import Dataset, DatasetDict, load_from_disk
 from sklearn.model_selection import train_test_split
 
 from utils import DPO_COLUMNS, SFT_COLUMNS, get_logger, md5_hash
@@ -19,8 +20,8 @@ PROJECT_ROOT = _SCRIPTS_DIR.parent
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 FINAL_DIR = PROJECT_ROOT / "data" / "final"
 
-SFT_INPUT = PROCESSED_DIR / "sft_anonymized.parquet"
-DPO_INPUT = PROCESSED_DIR / "dpo_anonymized.parquet"
+SFT_INPUT = PROCESSED_DIR / "sft_anonymized"
+DPO_INPUT = PROCESSED_DIR / "dpo_anonymized"
 RGPD_REPORT_SRC = PROCESSED_DIR / "rgpd_report.md"
 
 
@@ -191,14 +192,11 @@ def main() -> None:
     logger = get_logger("05_split_validate", verbose=args.verbose)
 
     # Vérifier idempotence
-    expected_files = [
-        FINAL_DIR / "sft_train.parquet",
-        FINAL_DIR / "sft_val.parquet",
-        FINAL_DIR / "sft_test.parquet",
-        FINAL_DIR / "dpo_train.parquet",
-        FINAL_DIR / "dpo_val.parquet",
+    expected_dirs = [
+        FINAL_DIR / "sft" / "dataset_dict.json",
+        FINAL_DIR / "dpo" / "dataset_dict.json",
     ]
-    if all(f.exists() for f in expected_files):
+    if all(f.exists() for f in expected_dirs):
         logger.info("Tous les fichiers finaux existent déjà, skip.")
         return
 
@@ -212,7 +210,7 @@ def main() -> None:
 
     # ── SFT ──
     logger.info("Chargement du dataset SFT anonymisé...")
-    df_sft = pd.read_parquet(SFT_INPUT)
+    df_sft = load_from_disk(str(SFT_INPUT)).to_pandas()
 
     if not validate_schema(df_sft, SFT_COLUMNS, "SFT", logger):
         checks_passed = False
@@ -251,10 +249,12 @@ def main() -> None:
         checks_passed = False
 
     # Sauvegarde SFT
-    sft_train.to_parquet(FINAL_DIR / "sft_train.parquet", index=False)
-    sft_val.to_parquet(FINAL_DIR / "sft_val.parquet", index=False)
-    sft_test.to_parquet(FINAL_DIR / "sft_test.parquet", index=False)
-    logger.info(f"SFT splits sauvegardés dans {FINAL_DIR}/")
+    DatasetDict({
+        "train": Dataset.from_pandas(sft_train),
+        "val": Dataset.from_pandas(sft_val),
+        "test": Dataset.from_pandas(sft_test),
+    }).save_to_disk(str(FINAL_DIR / "sft"))
+    logger.info(f"SFT splits sauvegardés dans {FINAL_DIR}/sft/")
 
     splits_info["sft_train"] = compute_split_info(sft_train, "sft_train")
     splits_info["sft_val"] = compute_split_info(sft_val, "sft_val")
@@ -262,7 +262,7 @@ def main() -> None:
 
     # ── DPO ──
     logger.info("Chargement du dataset DPO anonymisé...")
-    df_dpo = pd.read_parquet(DPO_INPUT)
+    df_dpo = load_from_disk(str(DPO_INPUT)).to_pandas()
 
     if not validate_schema(df_dpo, DPO_COLUMNS, "DPO", logger):
         checks_passed = False
@@ -277,13 +277,15 @@ def main() -> None:
         logger.error(f"[✗] DPO train : {dpo_identical} paires avec chosen == rejected !")
         checks_passed = False
 
-    # Validation schéma Parquet
-    logger.info("[✓] Schéma Parquet valide (toutes les colonnes requises présentes)")
+    # Validation schéma
+    logger.info("[✓] Schéma valide (toutes les colonnes requises présentes)")
 
     # Sauvegarde DPO
-    dpo_train.to_parquet(FINAL_DIR / "dpo_train.parquet", index=False)
-    dpo_val.to_parquet(FINAL_DIR / "dpo_val.parquet", index=False)
-    logger.info(f"DPO splits sauvegardés dans {FINAL_DIR}/")
+    DatasetDict({
+        "train": Dataset.from_pandas(dpo_train),
+        "val": Dataset.from_pandas(dpo_val),
+    }).save_to_disk(str(FINAL_DIR / "dpo"))
+    logger.info(f"DPO splits sauvegardés dans {FINAL_DIR}/dpo/")
 
     splits_info["dpo_train"] = compute_split_info(dpo_train, "dpo_train")
     splits_info["dpo_val"] = compute_split_info(dpo_val, "dpo_val")

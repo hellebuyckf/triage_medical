@@ -36,7 +36,7 @@ except ImportError:
 import mlflow
 import mlflow.pyfunc
 import pandas as pd
-from datasets import Dataset
+from datasets import Dataset, load_from_disk
 from peft import PeftModel
 from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import DPOConfig, DPOTrainer
@@ -51,8 +51,7 @@ MODEL_NAME = "unsloth/Qwen3-1.7B-Base"
 SFT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "sft"
 DPO_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "dpo"
 
-DPO_TRAIN_PATH = PROJECT_ROOT / "data" / "final" / "dpo_train.parquet"
-DPO_VAL_PATH = PROJECT_ROOT / "data" / "final" / "dpo_val.parquet"
+DPO_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "dpo"
 
 MAX_SEQ_LENGTH = 1024
 BETA = 0.1        # pénalité KL — force de l'alignement
@@ -152,18 +151,16 @@ def load_sft_merged_with_dpo_lora(
 
 @mlflow.trace(span_type="RETRIEVER", name="load_dpo_datasets")
 def load_dpo_datasets(
-    train_path: Path,
-    val_path: Path,
+    dpo_dir: Path,
 ) -> tuple[Dataset, Dataset]:
-    """Charge et formate les Parquets DPO pour le DPOTrainer.
+    """Charge et formate le DatasetDict DPO pour le DPOTrainer.
 
     Applique format_dpo_prompt() sur 'prompt' et format_dpo_response()
     sur 'chosen' et 'rejected'. Le DPOTrainer tokenise ces chaînes
     directement sans ré-appliquer de chat template.
 
     Args:
-        train_path: Chemin vers dpo_train.parquet.
-        val_path: Chemin vers dpo_val.parquet.
+        dpo_dir: Répertoire contenant le DatasetDict HF (splits train/val).
 
     Returns:
         Tuple (train_dataset, val_dataset) avec colonnes
@@ -181,8 +178,9 @@ def load_dpo_datasets(
         ]
         return Dataset.from_list(records)
 
-    df_train = pd.read_parquet(train_path)
-    df_val = pd.read_parquet(val_path)
+    dpo = load_from_disk(str(dpo_dir))
+    df_train = dpo["train"].to_pandas()
+    df_val = dpo["val"].to_pandas()
     return _format(df_train), _format(df_val)
 
 
@@ -267,10 +265,9 @@ def main() -> None:
         logger.error("Checkpoint SFT non trouvé : %s. Lancer 11_train_sft.py d'abord.", SFT_CHECKPOINT)
         sys.exit(1)
 
-    for path in [DPO_TRAIN_PATH, DPO_VAL_PATH]:
-        if not path.exists():
-            logger.error("Fichier manquant : %s. Lancer le pipeline S1 d'abord.", path)
-            sys.exit(1)
+    if not DPO_FINAL_DIR.exists():
+        logger.error("Dataset manquant : %s. Lancer le pipeline S1 d'abord.", DPO_FINAL_DIR)
+        sys.exit(1)
 
     # Resume depuis un checkpoint intermédiaire ?
     resume_path = get_latest_checkpoint(DPO_CHECKPOINT)
@@ -279,7 +276,7 @@ def main() -> None:
 
     # Chargement et formatage des datasets
     logger.info("Chargement des datasets DPO...")
-    train_dataset, val_dataset = load_dpo_datasets(DPO_TRAIN_PATH, DPO_VAL_PATH)
+    train_dataset, val_dataset = load_dpo_datasets(DPO_FINAL_DIR)
     logger.info("  train: %d paires | val: %d paires", len(train_dataset), len(val_dataset))
 
     # Chargement du modèle (base + SFT merged + DPO LoRA)
