@@ -3,7 +3,7 @@
 Stratégie :
 - Charge le modèle de base Qwen3-1.7B.
 - Applique le LoRA SFT et fusionne (merge_and_unload) → modèle SFT dense.
-- Applique le LoRA DPO et fusionne (save_pretrained_merged via Unsloth).
+- Applique le LoRA DPO et fusionne (merge_and_unload via PEFT standard).
 - Sauvegarde le modèle complet dans checkpoints/dpo_merged/ (format HuggingFace).
 - Vérifie l'export avec une inférence test via transformers standard (sans Unsloth)
   pour valider la compatibilité vLLM.
@@ -74,7 +74,7 @@ def merge_lora_weights(
 
     Flux de fusion en deux étapes :
     1. base → PeftModel(SFT) → merge_and_unload() → modèle SFT dense.
-    2. SFT dense → PeftModel(DPO) → FastLanguageModel.save_pretrained_merged().
+    2. SFT dense → PeftModel(DPO) → merge_and_unload() → modèle DPO dense.
 
     Unsloth optimise la fusion (évite les artefacts NaN, meilleure quantisation).
 
@@ -112,18 +112,19 @@ def save_merged_model(
     push_to_hub: bool = False,
     repo_id: str = "",
 ) -> None:
-    """Sauvegarde le modèle fusionné au format HuggingFace via Unsloth.
+    """Fusionne le LoRA DPO et sauvegarde au format HuggingFace (safetensors bf16).
 
-    Utilise FastLanguageModel.save_pretrained_merged() pour une fusion optimisée
-    (Unsloth applique des corrections pour éviter les NaN dans les poids).
+    Le modèle reçu contient encore l'adaptateur LoRA DPO non fusionné.
+    On appelle merge_and_unload() pour fusionner les poids, puis save_pretrained()
+    pour sauvegarder au format standard HuggingFace compatible vLLM/llama.cpp.
 
     Fichiers générés dans export_dir/ :
-    - config.json
+    - config.json, generation_config.json
     - model.safetensors (ou shards pour modèles > 5 GB)
     - tokenizer.json, tokenizer_config.json, special_tokens_map.json
 
     Args:
-        model: Modèle avec adaptateur LoRA DPO (avant fusion finale).
+        model: Modèle PeftModel avec adaptateur LoRA DPO (avant fusion finale).
         tokenizer: Tokenizer Qwen3.
         export_dir: Répertoire de sortie local.
         push_to_hub: Si True, upload vers HuggingFace Hub après sauvegarde locale.
@@ -131,21 +132,17 @@ def save_merged_model(
     """
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    # Fusion finale + sauvegarde via Unsloth (recommandé vs merge_and_unload)
-    FastLanguageModel.save_pretrained_merged(
-        model,
-        tokenizer,
-        str(export_dir),
-        save_method="merged_16bit",  # bf16, compatible vLLM et llama.cpp
-    )
+    # Fusion finale du LoRA DPO dans les poids du modèle SFT déjà fusionné
+    merged = model.merge_and_unload()
+    merged = merged.to(torch.bfloat16)  # garantit bf16 quelle que soit la config
+
+    # Sauvegarde standard HuggingFace — compatible vLLM et llama.cpp
+    merged.save_pretrained(str(export_dir), safe_serialization=True)
+    tokenizer.save_pretrained(str(export_dir))
 
     if push_to_hub and repo_id:
-        FastLanguageModel.push_to_hub_merged(
-            model,
-            tokenizer,
-            repo_id,
-            save_method="merged_16bit",
-        )
+        merged.push_to_hub(repo_id, safe_serialization=True)
+        tokenizer.push_to_hub(repo_id)
 
 
 def verify_export(
