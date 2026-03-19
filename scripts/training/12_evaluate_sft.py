@@ -3,6 +3,7 @@
 import argparse
 import random
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -110,32 +111,27 @@ def generate_response(
     Returns:
         Texte de la réponse générée, tronqué au premier <|im_end|>.
     """
-    with mlflow.start_span(name="generate_response", span_type="LLM") as span:
-        span.set_inputs({"instruction": instruction[:300]})
+    prompt = format_chat_prompt(instruction, response="")
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    input_length = inputs["input_ids"].shape[1]
 
-        prompt = format_chat_prompt(instruction, response="")
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        input_length = inputs["input_ids"].shape[1]
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
 
-        im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=DO_SAMPLE,
+            temperature=1.0,
+            eos_token_id=im_end_id,
+        )
 
-        with torch.no_grad():
-            output_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=DO_SAMPLE,
-                temperature=1.0,
-                eos_token_id=im_end_id,
-            )
+    generated_ids = output_ids[0][input_length:]
+    eos_positions = (generated_ids == im_end_id).nonzero(as_tuple=True)[0]
+    if len(eos_positions) > 0:
+        generated_ids = generated_ids[:eos_positions[0]]
 
-        generated_ids = output_ids[0][input_length:]
-        eos_positions = (generated_ids == im_end_id).nonzero(as_tuple=True)[0]
-        if len(eos_positions) > 0:
-            generated_ids = generated_ids[:eos_positions[0]]
-
-        response = tokenizer.decode(generated_ids, skip_special_tokens=True)
-        span.set_outputs({"response": response[:300]})
-        return response
+    return tokenizer.decode(generated_ids, skip_special_tokens=True)
 
 
 def check_format_compliance(text: str) -> bool:
@@ -186,76 +182,88 @@ def evaluate_split(
         if logger:
             logger.info("[%s] Sous-échantillon de %d exemples.", split_name, n_eval)
 
+    n_total = len(df)
+    n_oom = 0
     predictions: list[dict] = []
-    for idx in tqdm(range(len(df)), desc=f"Évaluation {split_name}"):
-        row = df.iloc[idx]
-        try:
-            generated = generate_response(model, tokenizer, row["instruction"])
-        except RuntimeError as e:
-            if "CUDA out of memory" in str(e):
-                if logger:
-                    logger.warning("OOM à l'exemple %d, skip.", idx)
-                torch.cuda.empty_cache()
-                generated = ""
-            else:
-                raise
-
-        predicted_urgency = extract_urgency_from_response(generated)
-        predictions.append({
-            "instruction": row["instruction"],
-            "reference_urgency": row["urgency_level"],
-            "predicted_urgency": predicted_urgency,
-            "generated_response": generated,
-            "format_ok": check_format_compliance(generated),
-        })
-
-    # Calcul des métriques
-    y_true_all = [p["reference_urgency"] for p in predictions]
-    y_pred_all = [p["predicted_urgency"] for p in predictions]
-
-    n_unparseable = sum(1 for p in y_pred_all if p is None)
-    valid_pairs = [(t, p) for t, p in zip(y_true_all, y_pred_all) if p is not None]
-
-    if valid_pairs:
-        y_true = [t for t, _ in valid_pairs]
-        y_pred = [p for _, p in valid_pairs]
-        accuracy = accuracy_score(y_true, y_pred)
-        f1_macro = f1_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)
-        cm = confusion_matrix(y_true, y_pred, labels=URGENCY_LABELS)
-    else:
-        accuracy = 0.0
-        f1_macro = 0.0
-        cm = None
-
-    format_compliance = sum(1 for p in predictions if p["format_ok"]) / len(predictions)
-    response_lengths = [len(p["generated_response"].split()) for p in predictions]
-    response_length_mean = sum(response_lengths) / len(response_lengths) if response_lengths else 0
-
-    metrics = {
-        "accuracy": round(accuracy, 4),
-        "f1_macro": round(f1_macro, 4),
-        "format_compliance": round(format_compliance, 4),
-        "response_length_mean": round(response_length_mean, 1),
-        "n_unparseable": n_unparseable,
-        "n_evaluated": len(predictions),
-        "confusion_matrix": cm,
-        "predictions": predictions,
-    }
-
-    if logger:
-        logger.info(
-            "[%s] accuracy=%.2f%% | f1_macro=%.4f | format=%.1f%% | unparseable=%d/%d",
-            split_name, accuracy * 100, f1_macro, format_compliance * 100,
-            n_unparseable, len(predictions),
-        )
 
     with mlflow.start_span(name=f"evaluate_split_{split_name}", span_type="CHAIN") as span:
-        span.set_inputs({"split": split_name, "n_evaluated": metrics["n_evaluated"]})
+        span.set_inputs({"split": split_name, "n_total": n_total, "n_requested": n_eval or n_total})
+        t0 = time.monotonic()
+
+        for idx in tqdm(range(len(df)), desc=f"Évaluation {split_name}"):
+            row = df.iloc[idx]
+            try:
+                generated = generate_response(model, tokenizer, row["instruction"])
+            except RuntimeError as e:
+                if "CUDA out of memory" in str(e):
+                    n_oom += 1
+                    if logger:
+                        logger.warning("OOM à l'exemple %d, skip.", idx)
+                    torch.cuda.empty_cache()
+                    generated = ""
+                else:
+                    raise
+
+            predicted_urgency = extract_urgency_from_response(generated)
+            predictions.append({
+                "instruction": row["instruction"],
+                "reference_urgency": row["urgency_level"],
+                "predicted_urgency": predicted_urgency,
+                "generated_response": generated,
+                "format_ok": check_format_compliance(generated),
+            })
+
+        duration_s = round(time.monotonic() - t0, 1)
+
+        # Calcul des métriques
+        y_true_all = [p["reference_urgency"] for p in predictions]
+        y_pred_all = [p["predicted_urgency"] for p in predictions]
+
+        n_unparseable = sum(1 for p in y_pred_all if p is None)
+        valid_pairs = [(t, p) for t, p in zip(y_true_all, y_pred_all) if p is not None]
+
+        if valid_pairs:
+            y_true = [t for t, _ in valid_pairs]
+            y_pred = [p for _, p in valid_pairs]
+            accuracy = accuracy_score(y_true, y_pred)
+            f1_macro = f1_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)
+            cm = confusion_matrix(y_true, y_pred, labels=URGENCY_LABELS)
+        else:
+            accuracy = 0.0
+            f1_macro = 0.0
+            cm = None
+
+        format_compliance = sum(1 for p in predictions if p["format_ok"]) / len(predictions)
+        response_lengths = [len(p["generated_response"].split()) for p in predictions]
+        response_length_mean = sum(response_lengths) / len(response_lengths) if response_lengths else 0
+
+        metrics = {
+            "accuracy": round(accuracy, 4),
+            "f1_macro": round(f1_macro, 4),
+            "format_compliance": round(format_compliance, 4),
+            "response_length_mean": round(response_length_mean, 1),
+            "n_unparseable": n_unparseable,
+            "n_evaluated": len(predictions),
+            "confusion_matrix": cm,
+            "predictions": predictions,
+        }
+
+        if logger:
+            logger.info(
+                "[%s] accuracy=%.2f%% | f1_macro=%.4f | format=%.1f%% | unparseable=%d | oom=%d | %.0fs",
+                split_name, accuracy * 100, f1_macro, format_compliance * 100,
+                n_unparseable, n_oom, duration_s,
+            )
+
         span.set_outputs({
             "accuracy": metrics["accuracy"],
             "f1_macro": metrics["f1_macro"],
             "format_compliance": metrics["format_compliance"],
-            "n_unparseable": metrics["n_unparseable"],
+            "n_evaluated": metrics["n_evaluated"],
+            "n_unparseable": n_unparseable,
+            "n_oom": n_oom,
+            "duration_s": duration_s,
+            "throughput_examples_per_min": round(len(predictions) / duration_s * 60, 1) if duration_s > 0 else 0,
         })
 
     return metrics
