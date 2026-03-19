@@ -23,7 +23,7 @@ import pandas as pd
 import torch
 from datasets import load_from_disk
 from peft import PeftModel
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, fbeta_score, recall_score
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerFast
 
@@ -227,10 +227,14 @@ def evaluate_split(
             y_pred = [p for _, p in valid_pairs]
             accuracy = accuracy_score(y_true, y_pred)
             f1_macro = f1_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)
+            recall_macro = recall_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)
+            f2_macro = fbeta_score(y_true, y_pred, beta=2, average="macro", labels=URGENCY_LABELS, zero_division=0)
             cm = confusion_matrix(y_true, y_pred, labels=URGENCY_LABELS)
         else:
             accuracy = 0.0
             f1_macro = 0.0
+            recall_macro = 0.0
+            f2_macro = 0.0
             cm = None
 
         format_compliance = sum(1 for p in predictions if p["format_ok"]) / len(predictions)
@@ -240,6 +244,8 @@ def evaluate_split(
         metrics = {
             "accuracy": round(accuracy, 4),
             "f1_macro": round(f1_macro, 4),
+            "recall_macro": round(recall_macro, 4),
+            "f2_macro": round(f2_macro, 4),
             "format_compliance": round(format_compliance, 4),
             "response_length_mean": round(response_length_mean, 1),
             "n_unparseable": n_unparseable,
@@ -250,14 +256,16 @@ def evaluate_split(
 
         if logger:
             logger.info(
-                "[%s] accuracy=%.2f%% | f1_macro=%.4f | format=%.1f%% | unparseable=%d | oom=%d | %.0fs",
-                split_name, accuracy * 100, f1_macro, format_compliance * 100,
+                "[%s] accuracy=%.2f%% | f1_macro=%.4f | recall_macro=%.4f | f2_macro=%.4f | format=%.1f%% | unparseable=%d | oom=%d | %.0fs",
+                split_name, accuracy * 100, f1_macro, recall_macro, f2_macro, format_compliance * 100,
                 n_unparseable, n_oom, duration_s,
             )
 
         span.set_outputs({
             "accuracy": metrics["accuracy"],
             "f1_macro": metrics["f1_macro"],
+            "recall_macro": metrics["recall_macro"],
+            "f2_macro": metrics["f2_macro"],
             "format_compliance": metrics["format_compliance"],
             "n_evaluated": metrics["n_evaluated"],
             "n_unparseable": n_unparseable,
@@ -330,6 +338,8 @@ def generate_eval_report(
 |---|---|---|
 | Accuracy | {val_metrics['accuracy']:.2%} | {test_metrics['accuracy']:.2%} |
 | F1 Macro | {val_metrics['f1_macro']:.4f} | {test_metrics['f1_macro']:.4f} |
+| Recall Macro | {val_metrics['recall_macro']:.4f} | {test_metrics['recall_macro']:.4f} |
+| F2 Macro (β=2) | {val_metrics['f2_macro']:.4f} | {test_metrics['f2_macro']:.4f} |
 | Format Compliance | {val_metrics['format_compliance']:.1%} | {test_metrics['format_compliance']:.1%} |
 | Longueur moyenne réponse | {val_metrics['response_length_mean']:.0f} mots | {test_metrics['response_length_mean']:.0f} mots |
 | Non-parseables | {val_metrics['n_unparseable']}/{val_metrics['n_evaluated']} | {test_metrics['n_unparseable']}/{test_metrics['n_evaluated']} |
@@ -339,23 +349,34 @@ def generate_eval_report(
 ## 2. Matrice de confusion (Val Set)
 
 """
-    cm = val_metrics.get("confusion_matrix")
-    if cm is not None:
+    cm_val = val_metrics.get("confusion_matrix")
+    if cm_val is not None:
         report += "| | Prédit max | Prédit moderate | Prédit deferred |\n"
         report += "|---|---|---|---|\n"
         for i, label in enumerate(URGENCY_LABELS):
-            row_vals = " | ".join(str(cm[i][j]) for j in range(len(URGENCY_LABELS)))
+            row_vals = " | ".join(str(cm_val[i][j]) for j in range(len(URGENCY_LABELS)))
             report += f"| **Réel {label}** | {row_vals} |\n"
     else:
         report += "Matrice non disponible (aucune prédiction valide).\n"
 
-    report += "\n---\n\n## 3. Exemples de bonnes prédictions\n\n"
+    report += "\n---\n\n## 3. Matrice de confusion (Test Set)\n\n"
+    cm_test = test_metrics.get("confusion_matrix")
+    if cm_test is not None:
+        report += "| | Prédit max | Prédit moderate | Prédit deferred |\n"
+        report += "|---|---|---|---|\n"
+        for i, label in enumerate(URGENCY_LABELS):
+            row_vals = " | ".join(str(cm_test[i][j]) for j in range(len(URGENCY_LABELS)))
+            report += f"| **Réel {label}** | {row_vals} |\n"
+    else:
+        report += "Matrice non disponible (aucune prédiction valide).\n"
+
+    report += "\n---\n\n## 4. Exemples de bonnes prédictions\n\n"
     for i, ex in enumerate(good_examples, 1):
         report += f"### Exemple {i} (✓ {ex['reference_urgency']})\n\n"
         report += f"**Instruction** : {ex['instruction'][:300]}\n\n"
         report += f"**Réponse générée** : {ex['generated_response'][:500]}\n\n"
 
-    report += "---\n\n## 4. Exemples de mauvaises prédictions\n\n"
+    report += "---\n\n## 5. Exemples de mauvaises prédictions\n\n"
     for i, ex in enumerate(bad_examples, 1):
         report += f"### Exemple {i} (attendu: {ex['reference_urgency']}, prédit: {ex['predicted_urgency']})\n\n"
         report += f"**Instruction** : {ex['instruction'][:300]}\n\n"
@@ -363,7 +384,7 @@ def generate_eval_report(
 
     # Recommandation
     acc = val_metrics["accuracy"]
-    report += "---\n\n## 5. Recommandation\n\n"
+    report += "---\n\n## 6. Recommandation\n\n"
     if acc >= 0.70:
         report += f"**Accuracy ({acc:.1%}) >= 70%** : Modèle prêt pour la phase DPO (semaine 3).\n"
     elif acc >= 0.60:
@@ -464,12 +485,16 @@ def main() -> None:
         metrics_to_log = {
             "test_accuracy": test_metrics["accuracy"],
             "test_f1_macro": test_metrics["f1_macro"],
+            "test_recall_macro": test_metrics["recall_macro"],
+            "test_f2_macro": test_metrics["f2_macro"],
             "test_format_compliance": test_metrics["format_compliance"],
         }
         if val_metrics:
             metrics_to_log.update({
                 "val_accuracy": val_metrics["accuracy"],
                 "val_f1_macro": val_metrics["f1_macro"],
+                "val_recall_macro": val_metrics["recall_macro"],
+                "val_f2_macro": val_metrics["f2_macro"],
                 "val_format_compliance": val_metrics["format_compliance"],
                 "val_n_unparseable": val_metrics["n_unparseable"],
             })

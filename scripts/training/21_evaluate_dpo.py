@@ -24,7 +24,7 @@ import mlflow
 import pandas as pd
 from datasets import load_from_disk
 from peft import PeftModel
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, fbeta_score, recall_score
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerFast
 
@@ -284,9 +284,11 @@ def evaluate_split(
             y_pred = [p for _, p in valid]
             accuracy = accuracy_score(y_true, y_pred)
             f1 = f1_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)
+            recall_macro = recall_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)
+            f2_macro = fbeta_score(y_true, y_pred, beta=2, average="macro", labels=URGENCY_LABELS, zero_division=0)
             cm = confusion_matrix(y_true, y_pred, labels=URGENCY_LABELS)
         else:
-            accuracy, f1, cm = 0.0, 0.0, None
+            accuracy, f1, recall_macro, f2_macro, cm = 0.0, 0.0, 0.0, 0.0, None
 
         format_compliance = sum(p["format_ok"] for p in predictions) / len(predictions)
         avg_len = sum(len(p["generated_response"].split()) for p in predictions) / len(predictions)
@@ -294,6 +296,8 @@ def evaluate_split(
         metrics = {
             "accuracy": round(accuracy, 4),
             "f1_macro": round(f1, 4),
+            "recall_macro": round(recall_macro, 4),
+            "f2_macro": round(f2_macro, 4),
             "format_compliance": round(format_compliance, 4),
             "response_length_mean": round(avg_len, 1),
             "n_unparseable": n_unparseable,
@@ -304,14 +308,16 @@ def evaluate_split(
 
         if logger:
             logger.info(
-                "[%s] accuracy=%.2f%% | f1=%.4f | format=%.1f%% | unparseable=%d | oom=%d | %.0fs",
-                split_name, accuracy * 100, f1, format_compliance * 100,
+                "[%s] accuracy=%.2f%% | f1=%.4f | recall_macro=%.4f | f2_macro=%.4f | format=%.1f%% | unparseable=%d | oom=%d | %.0fs",
+                split_name, accuracy * 100, f1, recall_macro, f2_macro, format_compliance * 100,
                 n_unparseable, n_oom, duration_s,
             )
 
         span.set_outputs({
             "accuracy": metrics["accuracy"],
             "f1_macro": metrics["f1_macro"],
+            "recall_macro": metrics["recall_macro"],
+            "f2_macro": metrics["f2_macro"],
             "format_compliance": metrics["format_compliance"],
             "n_evaluated": metrics["n_evaluated"],
             "n_unparseable": n_unparseable,
@@ -406,6 +412,8 @@ def generate_dpo_eval_report(
 |---|---|---|---|
 | Accuracy | {sft_val_metrics['accuracy']:.2%} | {dpo_val_metrics['accuracy']:.2%} | {delta(sft_val_metrics['accuracy'], dpo_val_metrics['accuracy'], pct=True)} |
 | F1 Macro | {sft_val_metrics['f1_macro']:.4f} | {dpo_val_metrics['f1_macro']:.4f} | {delta(sft_val_metrics['f1_macro'], dpo_val_metrics['f1_macro'])} |
+| Recall Macro | {sft_val_metrics['recall_macro']:.4f} | {dpo_val_metrics['recall_macro']:.4f} | {delta(sft_val_metrics['recall_macro'], dpo_val_metrics['recall_macro'])} |
+| F2 Macro (β=2) | {sft_val_metrics['f2_macro']:.4f} | {dpo_val_metrics['f2_macro']:.4f} | {delta(sft_val_metrics['f2_macro'], dpo_val_metrics['f2_macro'])} |
 | Format Compliance | {sft_val_metrics['format_compliance']:.1%} | {dpo_val_metrics['format_compliance']:.1%} | {delta(sft_val_metrics['format_compliance'], dpo_val_metrics['format_compliance'], pct=True)} |
 | Non-parseables | {sft_val_metrics['n_unparseable']}/{sft_val_metrics['n_evaluated']} | {dpo_val_metrics['n_unparseable']}/{dpo_val_metrics['n_evaluated']} | — |
 | Longueur réponse (mots) | {sft_val_metrics['response_length_mean']:.0f} | {dpo_val_metrics['response_length_mean']:.0f} | {delta(sft_val_metrics['response_length_mean'], dpo_val_metrics['response_length_mean'])} |
@@ -416,6 +424,8 @@ def generate_dpo_eval_report(
 |---|---|---|---|
 | Accuracy | {sft_test_metrics['accuracy']:.2%} | {dpo_test_metrics['accuracy']:.2%} | {delta(sft_test_metrics['accuracy'], dpo_test_metrics['accuracy'], pct=True)} |
 | F1 Macro | {sft_test_metrics['f1_macro']:.4f} | {dpo_test_metrics['f1_macro']:.4f} | {delta(sft_test_metrics['f1_macro'], dpo_test_metrics['f1_macro'])} |
+| Recall Macro | {sft_test_metrics['recall_macro']:.4f} | {dpo_test_metrics['recall_macro']:.4f} | {delta(sft_test_metrics['recall_macro'], dpo_test_metrics['recall_macro'])} |
+| F2 Macro (β=2) | {sft_test_metrics['f2_macro']:.4f} | {dpo_test_metrics['f2_macro']:.4f} | {delta(sft_test_metrics['f2_macro'], dpo_test_metrics['f2_macro'])} |
 | Format Compliance | {sft_test_metrics['format_compliance']:.1%} | {dpo_test_metrics['format_compliance']:.1%} | {delta(sft_test_metrics['format_compliance'], dpo_test_metrics['format_compliance'], pct=True)} |
 
 ---
@@ -423,17 +433,28 @@ def generate_dpo_eval_report(
 ## 3. Matrice de confusion DPO (Val Set)
 
 """
-    cm = dpo_val_metrics.get("confusion_matrix")
-    if cm is not None:
+    cm_val = dpo_val_metrics.get("confusion_matrix")
+    if cm_val is not None:
         report += "| | Prédit max | Prédit moderate | Prédit deferred |\n"
         report += "|---|---|---|---|\n"
         for i, label in enumerate(URGENCY_LABELS):
-            row_vals = " | ".join(str(cm[i][j]) for j in range(len(URGENCY_LABELS)))
+            row_vals = " | ".join(str(cm_val[i][j]) for j in range(len(URGENCY_LABELS)))
             report += f"| **Réel {label}** | {row_vals} |\n"
     else:
         report += "Matrice non disponible.\n"
 
-    report += "\n---\n\n## 4. Comparaisons qualitatives SFT vs DPO\n\n"
+    report += "\n---\n\n## 4. Matrice de confusion DPO (Test Set)\n\n"
+    cm_test = dpo_test_metrics.get("confusion_matrix")
+    if cm_test is not None:
+        report += "| | Prédit max | Prédit moderate | Prédit deferred |\n"
+        report += "|---|---|---|---|\n"
+        for i, label in enumerate(URGENCY_LABELS):
+            row_vals = " | ".join(str(cm_test[i][j]) for j in range(len(URGENCY_LABELS)))
+            report += f"| **Réel {label}** | {row_vals} |\n"
+    else:
+        report += "Matrice non disponible.\n"
+
+    report += "\n---\n\n## 5. Comparaisons qualitatives SFT vs DPO\n\n"
     for i, comp in enumerate(comparisons, 1):
         report += f"### Exemple {i}\n\n"
         report += f"**Prompt** : {comp['prompt'][:300]}\n\n"
@@ -445,7 +466,7 @@ def generate_dpo_eval_report(
 
     # Recommandation
     acc_delta = dpo_val_metrics["accuracy"] - sft_val_metrics["accuracy"]
-    report += "## 5. Recommandation\n\n"
+    report += "## 6. Recommandation\n\n"
     if acc_delta >= -0.03 and dpo_val_metrics["accuracy"] >= 0.65:
         report += (
             f"**DPO validé** : accuracy DPO ({dpo_val_metrics['accuracy']:.1%}) "
@@ -573,15 +594,26 @@ def main() -> None:
         metrics_to_log = {
             "sft_test_accuracy": sft_test["accuracy"],
             "sft_test_f1_macro": sft_test["f1_macro"],
+            "sft_test_recall_macro": sft_test["recall_macro"],
+            "sft_test_f2_macro": sft_test["f2_macro"],
             "dpo_test_accuracy": dpo_test["accuracy"],
             "dpo_test_f1_macro": dpo_test["f1_macro"],
+            "dpo_test_recall_macro": dpo_test["recall_macro"],
+            "dpo_test_f2_macro": dpo_test["f2_macro"],
             "dpo_test_format_compliance": dpo_test["format_compliance"],
             "accuracy_delta": dpo_test["accuracy"] - sft_test["accuracy"],
+            "f1_macro_delta": dpo_test["f1_macro"] - sft_test["f1_macro"],
+            "recall_macro_delta": dpo_test["recall_macro"] - sft_test["recall_macro"],
+            "f2_macro_delta": dpo_test["f2_macro"] - sft_test["f2_macro"],
         }
         if sft_val and dpo_val:
             metrics_to_log.update({
                 "sft_val_accuracy": sft_val["accuracy"],
+                "sft_val_recall_macro": sft_val["recall_macro"],
+                "sft_val_f2_macro": sft_val["f2_macro"],
                 "dpo_val_accuracy": dpo_val["accuracy"],
+                "dpo_val_recall_macro": dpo_val["recall_macro"],
+                "dpo_val_f2_macro": dpo_val["f2_macro"],
             })
         mlflow.log_metrics(metrics_to_log)
         mlflow.log_artifact(str(REPORT_PATH))
