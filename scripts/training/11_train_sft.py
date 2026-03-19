@@ -26,6 +26,7 @@ except ImportError:
     sys.exit(1)
 
 import mlflow
+import mlflow.pyfunc
 from datasets import load_from_disk
 from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import SFTConfig, SFTTrainer
@@ -53,6 +54,25 @@ SEED = 42
 
 MLFLOW_EXPERIMENT = "sft-qwen3-1.7b-triage"
 MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
+REGISTERED_MODEL_NAME = "sft-qwen3-1.7b-triage"
+
+
+# ── MLflow model wrapper ───────────────────────────────────────────────────────
+
+
+class _LoraAdapterModel(mlflow.pyfunc.PythonModel):
+    """Pointeur MLflow vers un adaptateur LoRA SFT.
+
+    Permet d'attacher l'adapter au run et de l'enregistrer dans le Model Registry.
+    Le chargement réel se fait via PEFT :
+        PeftModel.from_pretrained(base_model, context.artifacts["adapter_dir"])
+    """
+
+    def predict(self, context, model_input, params=None):
+        raise NotImplementedError(
+            "Charger via PEFT : "
+            "PeftModel.from_pretrained(base_model, context.artifacts['adapter_dir'])"
+        )
 
 
 # ── Fonctions ─────────────────────────────────────────────────────────────────
@@ -280,11 +300,17 @@ def main() -> None:
         tokenizer.save_pretrained(str(CHECKPOINT_DIR))
         logger.info("Adaptateur LoRA sauvegardé dans %s", CHECKPOINT_DIR)
 
-        # Log des artefacts MLflow — poids LoRA finaux (fichiers top-level uniquement,
-        # on exclut les sous-dossiers checkpoint-N/ qui sont des sauvegardes intermédiaires)
-        for f in sorted(CHECKPOINT_DIR.iterdir()):
-            if f.is_file():
-                mlflow.log_artifact(str(f), artifact_path="adapter")
+        # Enregistrement du modèle dans MLflow (attache l'adapter au run + Model Registry).
+        # Les fichiers top-level du checkpoint sont copiés dans mlruns/ (~100 MB).
+        # Les sous-dossiers checkpoint-N/ (sauvegardes intermédiaires) sont exclus.
+        adapter_files = {f.name: str(f) for f in CHECKPOINT_DIR.iterdir() if f.is_file()}
+        mlflow.pyfunc.log_model(
+            artifact_path="adapter",
+            python_model=_LoraAdapterModel(),
+            artifacts=adapter_files,
+            registered_model_name=REGISTERED_MODEL_NAME,
+            metadata={"base_model": MODEL_NAME, "lora_r": LORA_R, "stage": "sft"},
+        )
 
     logger.info("=== Entraînement SFT terminé. ===")
 
