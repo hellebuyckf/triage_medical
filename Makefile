@@ -87,8 +87,8 @@ mlflow-up:
 	docker run -d \
 		--name $(MLFLOW_CONTAINER) \
 		-p 127.0.0.1:5000:5000 \
-		-v $(PWD)/mlflow.db:/mlflow.db:ro \
-		-v $(PWD)/mlruns:/mlruns:ro \
+		-v $(PWD)/mlflow.db:/mlflow.db \
+		-v $(PWD)/mlruns:/mlruns \
 		--restart unless-stopped \
 		$(MLFLOW_IMAGE)
 	@echo "MLflow UI démarré → tunnel SSH : ssh -L 5000:localhost:5000 <user>@<ip_serveur>"
