@@ -1,3 +1,3 @@
 [submodule "specs"]
 	path = specs
-	url = https://github.com/FrancoisHellebuyck-Formation/project14-specs.git
+	url = git@github.com:FrancoisHellebuyck-Formation/project14-specs.git
