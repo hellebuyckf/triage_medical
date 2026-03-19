@@ -2,7 +2,7 @@
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
         dpo-pipeline train-dpo evaluate-dpo export-model \
         mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow \
-        clean clean-all help
+        clean clean-sft clean-dpo clean-all help
 
 # Variables
 PYTHON          = uv run python
@@ -107,6 +107,12 @@ clean-mlflow:
 clean:
 	rm -rf data/raw data/processed
 
+clean-sft:
+	rm -rf checkpoints/sft data/processed/sft_tokenized
+
+clean-dpo:
+	rm -rf checkpoints/dpo checkpoints/dpo_merged
+
 clean-all:
 	rm -rf data/raw data/processed data/final checkpoints
 
@@ -150,4 +156,6 @@ help:
 	@echo ""
 	@echo "  Nettoyage"
 	@echo "  make clean             — supprime raw/ et processed/"
+	@echo "  make clean-sft         — supprime checkpoints/sft et sft_tokenized/"
+	@echo "  make clean-dpo         — supprime checkpoints/dpo et dpo_merged/"
 	@echo "  make clean-all         — supprime tout data/ et checkpoints/"
