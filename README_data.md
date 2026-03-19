@@ -127,18 +127,20 @@ sft = load_dataset("ton_username/project14-sft")
 
 ### Pré-requis
 
-S'authentifier avec l'une des deux méthodes suivantes :
+Le token HuggingFace est lu automatiquement depuis le fichier **`.env` à la racine du projet** :
 
 ```bash
-# Option 1 — login interactif (stocke le token dans ~/.cache/huggingface/)
-huggingface-cli login
-
-# Option 2 — variable d'environnement (scripts non-interactifs, CI/CD)
-export HF_TOKEN=hf_xxxxxxxxxxxxxxxx
+# .env  (ne jamais committer ce fichier — déjà dans .gitignore)
+HF_TOKEN=hf_xxxxxxxxxxxxxxxx
 ```
 
-> Le token doit avoir la permission **write** sur ton espace HF.
 > Créer ou gérer les tokens sur : https://huggingface.co/settings/tokens
+> Le token doit avoir la permission **write**.
+
+Ordre de priorité du chargement :
+1. `.env` à la racine du projet (via `python-dotenv`)
+2. Variable `HF_TOKEN` déjà définie dans le shell (non écrasée)
+3. Credentials stockés par `huggingface-cli login` (dernier recours)
 
 ### Commandes Make
 

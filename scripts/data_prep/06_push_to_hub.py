@@ -17,6 +17,10 @@ Usage :
     uv run python scripts/data_prep/06_push_to_hub.py --username <hf_username>
     uv run python scripts/data_prep/06_push_to_hub.py --username <hf_username> --private
     uv run python scripts/data_prep/06_push_to_hub.py --username <hf_username> --include-processed
+
+Authentification :
+    Le token HuggingFace est lu depuis .env (HF_TOKEN=hf_xxx) à la racine du projet.
+    Fallback : variable d'environnement HF_TOKEN déjà définie dans le shell.
 """
 
 import argparse
@@ -24,9 +28,16 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+
+# Charge HF_TOKEN depuis PROJECT_ROOT/.env (sans écraser une valeur déjà présente dans
+# le shell — override=False). Silencieux si le fichier est absent.
+_PROJECT_ROOT = _SCRIPTS_DIR.parent
+load_dotenv(dotenv_path=_PROJECT_ROOT / ".env", override=False)
 
 from datasets import Dataset, DatasetDict, load_from_disk
 
@@ -100,8 +111,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Authentification :\n"
-            "  La variable d'environnement HF_TOKEN doit être définie,\n"
-            "  ou l'utilisateur doit être connecté via : huggingface-cli login\n\n"
+            "  Le token est lu depuis .env à la racine du projet (HF_TOKEN=hf_xxx).\n"
+            "  Fallback : variable d'env HF_TOKEN déjà définie dans le shell.\n"
+            "  Dernier recours : huggingface-cli login\n\n"
             "Exemples :\n"
             "  uv run python scripts/data_prep/06_push_to_hub.py --username johndoe\n"
             "  uv run python scripts/data_prep/06_push_to_hub.py --username johndoe --private\n"
@@ -135,6 +147,17 @@ def main() -> None:
             "Utiliser --username <hf_username> ou définir HF_USERNAME."
         )
         sys.exit(1)
+
+    # Vérification du token avant tout push
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if hf_token:
+        logger.info("Token HF_TOKEN chargé (%s...%s).", hf_token[:6], hf_token[-4:])
+    else:
+        logger.warning(
+            "HF_TOKEN introuvable dans .env ni dans l'environnement. "
+            "Le push utilisera les credentials stockés par huggingface-cli login. "
+            "En cas d'erreur 401, ajouter HF_TOKEN=hf_xxx dans .env à la racine du projet."
+        )
 
     username = args.username
 

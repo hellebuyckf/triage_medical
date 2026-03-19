@@ -25,6 +25,7 @@ dependencies = [
     "mlflow>=2.13",
     "duckdb>=1.5.0",
     "pynvml>=13.0.1",
+    "python-dotenv>=1.2.2",
 ]
 
 [build-system]
