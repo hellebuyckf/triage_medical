@@ -1,6 +1,6 @@
 .PHONY: all setup download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
-        dpo-pipeline train-dpo evaluate-dpo export-model \
+        dpo-pipeline train-dpo evaluate-dpo export-model push-model \
         push-datasets push-datasets-all \
         mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow \
         clean clean-sft clean-dpo clean-all help
@@ -79,6 +79,17 @@ evaluate-dpo: train-dpo
 
 export-model: evaluate-dpo
 	$(PYTHON) $(TRAINING)/22_export_model.py
+
+push-model: export-model
+	@if [ -z "$(HF_USERNAME)" ]; then \
+		echo "Erreur : HF_USERNAME non défini."; \
+		echo "Usage  : make push-model HF_USERNAME=<votre_username>"; \
+		exit 1; \
+	fi
+	$(PYTHON) $(TRAINING)/22_export_model.py \
+		--push-to-hub \
+		--repo-id $(HF_USERNAME)/qwen3-triage-dpo \
+		--skip-verify
 
 # ── HuggingFace Hub ───────────────────────────────────────────────────────────
 
@@ -175,9 +186,11 @@ help:
 	@echo "  make train-dpo         — alignement DPO LoRA"
 	@echo "  make evaluate-dpo      — évaluation SFT vs DPO sur test set (honnête)"
 	@echo "  make evaluate-dpo EVAL_VAL=1  — idem + val set (biaisé, désactivé par défaut)"
-	@echo "  make export-model      — fusion LoRA + export format HuggingFace"
+	@echo "  make export-model      — fusion LoRA SFT+DPO → checkpoints/dpo_merged/"
+	@echo "  make push-model HF_USERNAME=<user>   — export + push modèle fusionné vers HF Hub"
 	@echo ""
 	@echo "  HuggingFace Hub"
+	@echo "  make push-model HF_USERNAME=<user>         — push modèle fusionné (username/qwen3-triage-dpo)"
 	@echo "  make push-datasets HF_USERNAME=<user>      — publie sft + dpo finaux (DatasetDict)"
 	@echo "  make push-datasets-all HF_USERNAME=<user>  — idem + datasets intermédiaires"
 	@echo "  make push-datasets HF_USERNAME=<user> HF_PRIVATE=1  — dépôts privés"

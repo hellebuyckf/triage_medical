@@ -267,10 +267,27 @@ def main() -> None:
 
     logger = get_logger("22_export_model", verbose=args.verbose)
 
-    # Idempotence
+    # Idempotence : skip la fusion si le modèle exporté est déjà présent,
+    # SAUF si --push-to-hub est demandé (on recharge depuis l'export local).
     merged_config = EXPORT_DIR / "config.json"
-    if merged_config.exists():
+    if merged_config.exists() and not args.push_to_hub:
         logger.info("Modèle fusionné déjà présent : %s — skip.", EXPORT_DIR)
+        return
+
+    if merged_config.exists() and args.push_to_hub:
+        logger.info(
+            "Modèle fusionné déjà présent dans %s — push vers HF Hub sans re-fusionner.",
+            EXPORT_DIR,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(str(EXPORT_DIR))
+        model = AutoModelForCausalLM.from_pretrained(
+            str(EXPORT_DIR),
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+        )
+        model.push_to_hub(args.repo_id, safe_serialization=True)
+        tokenizer.push_to_hub(args.repo_id)
+        logger.info("Modèle poussé sur HF Hub : %s", args.repo_id)
         return
 
     # Vérifications préalables
