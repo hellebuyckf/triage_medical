@@ -10,10 +10,13 @@ Stratégie :
 """
 
 import argparse
+import os
 import sys
+from functools import partial
 from pathlib import Path
 
 import torch
+import yaml
 
 # Workaround Unsloth/Qwen3 : forward patches produisent des tenseurs non-contigus.
 # cublasLt gère correctement ce cas, cuBLAS standard crash.
@@ -33,19 +36,20 @@ except ImportError:
     sys.exit(1)
 
 import mlflow
-import mlflow.pyfunc
-import pandas as pd
+import mlflow.transformers
 from datasets import Dataset, DatasetDict, load_from_disk
+from dotenv import load_dotenv
 from peft import PeftModel
 from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import DPOConfig, DPOTrainer
-from utils import format_dpo_prompt, format_dpo_response, get_latest_checkpoint, get_logger
+from utils import SYSTEM_PROMPT, get_latest_checkpoint, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "unsloth/Qwen3-1.7B-Base"
+MODEL_NAME = os.getenv("MODEL_NAME", "unsloth/Qwen3-1.7B")
 SFT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "sft"
 DPO_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "dpo"
 
@@ -77,22 +81,76 @@ MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
 REGISTERED_MODEL_NAME = "dpo-qwen3-1.7b-triage"
 
 
-# ── MLflow model wrapper ───────────────────────────────────────────────────────
+# ── Config loader ──────────────────────────────────────────────────────────────
 
 
-class _LoraAdapterModel(mlflow.pyfunc.PythonModel):
-    """Pointeur MLflow vers un adaptateur LoRA DPO.
+def load_training_config(config_path: Path) -> dict:
+    """Load hyperparameters from a YAML config file.
 
-    Permet d'attacher l'adapter au run et de l'enregistrer dans le Model Registry.
-    Le chargement réel se fait via PEFT :
-        PeftModel.from_pretrained(sft_merged_model, context.artifacts["adapter_dir"])
+    Args:
+        config_path: Path to the YAML config file.
+
+    Returns:
+        Parsed config dict with keys 'training' and 'lora'.
     """
+    if not config_path.exists():
+        print(f"Config file not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+    with config_path.open() as f:
+        return yaml.safe_load(f)
 
-    def predict(self, context, model_input, params=None):
-        raise NotImplementedError(
-            "Charger via PEFT : "
-            "PeftModel.from_pretrained(sft_merged_model, context.artifacts['adapter_dir'])"
+
+# ── Batch transform functions ──────────────────────────────────────────────────
+# Defined at module level for picklability (required when num_proc > 1).
+
+
+def _format_dpo_batch(
+    batch: dict[str, list],
+    tokenizer: PreTrainedTokenizerFast,
+) -> dict[str, list]:
+    """Formate un batch DPO via apply_chat_template.
+
+    Double appel au template (même pattern que script 10) :
+    1. ``[system, user]`` + ``add_generation_prompt=True``  → prompt_text
+    2. ``[system, user, assistant]``                         → full_text
+    completion = full_text[len(prompt_text):]
+
+    Args:
+        batch: Dict de listes avec clés ``prompt``, ``chosen``, ``rejected``.
+        tokenizer: Tokenizer Qwen3 dont le chat template pilote le formatage.
+
+    Returns:
+        Dict de listes avec les mêmes clés, formatées en ChatML.
+    """
+    prompts: list[str] = []
+    chosens: list[str] = []
+    rejecteds: list[str] = []
+    for prompt, chosen, rejected in zip(
+        batch["prompt"], batch["chosen"], batch["rejected"], strict=True
+    ):
+        system_user = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": str(prompt)},
+        ]
+        prompt_text: str = tokenizer.apply_chat_template(  # type: ignore[assignment]
+            system_user,
+            tokenize=False,
+            add_generation_prompt=True,
         )
+        full_chosen: str = tokenizer.apply_chat_template(  # type: ignore[assignment]
+            system_user + [{"role": "assistant", "content": str(chosen)}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        full_rejected: str = tokenizer.apply_chat_template(  # type: ignore[assignment]
+            system_user + [{"role": "assistant", "content": str(rejected)}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        prompts.append(prompt_text)
+        chosens.append(full_chosen[len(prompt_text) :])
+        rejecteds.append(full_rejected[len(prompt_text) :])
+    return {"prompt": prompts, "chosen": chosens, "rejected": rejecteds}
 
 
 # ── Fonctions ─────────────────────────────────────────────────────────────────
@@ -155,36 +213,26 @@ def load_sft_merged_with_dpo_lora(
 @mlflow.trace(span_type="RETRIEVER", name="load_dpo_datasets")
 def load_dpo_datasets(
     dpo_dir: Path,
+    tokenizer: PreTrainedTokenizerFast,
 ) -> tuple[Dataset, Dataset]:
     """Charge et formate le DatasetDict DPO pour le DPOTrainer.
 
-    Applique format_dpo_prompt() sur 'prompt' et format_dpo_response()
-    sur 'chosen' et 'rejected'. Le DPOTrainer tokenise ces chaînes
-    directement sans ré-appliquer de chat template.
+    Utilise ``_format_dpo_batch`` avec ``Dataset.map(batched=True)`` pour
+    exploiter Apache Arrow sans round-trip pandas. Même pattern que script 10.
 
     Args:
         dpo_dir: Répertoire contenant le DatasetDict HF (splits train/val).
+        tokenizer: Tokenizer Qwen3 dont le chat template pilote le formatage.
 
     Returns:
         Tuple (train_dataset, val_dataset) avec colonnes
-        {prompt, chosen, rejected} formatées en ChatML.
+        {prompt, chosen, rejected} formatées via apply_chat_template.
     """
-
-    def _format(df: pd.DataFrame) -> Dataset:
-        records = [
-            {
-                "prompt": format_dpo_prompt(str(row["prompt"])),
-                "chosen": format_dpo_response(str(row["chosen"])),
-                "rejected": format_dpo_response(str(row["rejected"])),
-            }
-            for _, row in df.iterrows()
-        ]
-        return Dataset.from_list(records)
-
     dpo = DatasetDict(load_from_disk(str(dpo_dir)))  # type: ignore[arg-type]
-    df_train = pd.DataFrame(dpo["train"].to_pandas())
-    df_val = pd.DataFrame(dpo["val"].to_pandas())
-    return _format(df_train), _format(df_val)
+    _format_fn = partial(_format_dpo_batch, tokenizer=tokenizer)
+    train_dataset = dpo["train"].map(_format_fn, batched=True)
+    val_dataset = dpo["val"].map(_format_fn, batched=True)
+    return train_dataset, val_dataset
 
 
 def build_dpo_config(output_dir: Path) -> DPOConfig:
@@ -212,6 +260,10 @@ def build_dpo_config(output_dir: Path) -> DPOConfig:
         beta=BETA,
         loss_type="sigmoid",  # DPO classique (Rafailov et al. 2023)  # type: ignore[reportArgumentType]
         max_length=MAX_SEQ_LENGTH,
+        # NOTE : max_prompt_length et max_completion_length ne sont pas supportés
+        # par la version patchée de DPOConfig dans Unsloth (UnslothDPOTrainer.py).
+        # La protection contre la troncature des réponses est assurée partiellement
+        # par max_length=1024 qui plafonne la séquence totale prompt+réponse.
         logging_steps=10,
         eval_strategy="steps",
         eval_steps=50,
@@ -252,9 +304,40 @@ def main() -> None:
     """
     parser = argparse.ArgumentParser(description="Entraînement DPO")
     parser.add_argument("--verbose", action="store_true", help="Logging DEBUG")
-    parser.add_argument("--beta", type=float, default=BETA, help="Pénalité KL DPO")
-    parser.add_argument("--epochs", type=int, default=EPOCHS, help="Nombre d'epochs")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=PROJECT_ROOT / "configs" / "dpo.yaml",
+        help="Chemin vers le fichier de config YAML (défaut: configs/dpo.yaml)",
+    )
+    parser.add_argument("--beta", type=float, default=None, help="Override pénalité KL DPO")
+    parser.add_argument("--epochs", type=int, default=None, help="Override nombre d'epochs")
     args = parser.parse_args()
+
+    cfg = load_training_config(args.config)
+    t = cfg["training"]
+    lora = cfg["lora"]
+
+    global MAX_SEQ_LENGTH, BETA, LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES
+    global LEARNING_RATE, EPOCHS, BATCH_SIZE, GRAD_ACCUM, SEED
+
+    MAX_SEQ_LENGTH = t["max_seq_length"]
+    BETA = t["beta"]
+    LEARNING_RATE = t["learning_rate"]
+    EPOCHS = t["epochs"]
+    BATCH_SIZE = t["batch_size"]
+    GRAD_ACCUM = t["grad_accum"]
+    SEED = t["seed"]
+    LORA_R = lora["r"]
+    LORA_ALPHA = lora["alpha"]
+    LORA_DROPOUT = lora["dropout"]
+    LORA_TARGET_MODULES = lora["target_modules"]
+
+    # CLI overrides (optionnels — écrasent le YAML si fournis)
+    if args.beta is not None:
+        BETA = args.beta
+    if args.epochs is not None:
+        EPOCHS = args.epochs
 
     logger = get_logger("20_train_dpo", verbose=args.verbose)
     set_seed(SEED)
@@ -283,18 +366,19 @@ def main() -> None:
             "Checkpoint intermédiaire trouvé : %s — reprise de l'entraînement.", resume_path
         )
 
-    # Chargement et formatage des datasets
-    logger.info("Chargement des datasets DPO...")
-    train_dataset, val_dataset = load_dpo_datasets(DPO_FINAL_DIR)
-    logger.info("  train: %d paires | val: %d paires", len(train_dataset), len(val_dataset))
-
     # Chargement du modèle (base + SFT merged + DPO LoRA)
+    # Le tokenizer est nécessaire pour formater les datasets via apply_chat_template.
     logger.info(
         "Chargement du modèle : base + SFT merged + DPO LoRA (r=%d, beta=%.2f)...",
         LORA_R,
-        args.beta,
+        BETA,
     )
     model, tokenizer = load_sft_merged_with_dpo_lora(MODEL_NAME, SFT_CHECKPOINT, MAX_SEQ_LENGTH)
+
+    # Chargement et formatage des datasets (nécessite le tokenizer pour apply_chat_template)
+    logger.info("Chargement des datasets DPO...")
+    train_dataset, val_dataset = load_dpo_datasets(DPO_FINAL_DIR, tokenizer)
+    logger.info("  train: %d paires | val: %d paires", len(train_dataset), len(val_dataset))
     log_model_info(model, logger)
 
     # Configuration MLflow
@@ -309,8 +393,6 @@ def main() -> None:
     with mlflow.start_run(run_name="dpo-qwen3-1.7b-triage"):
         # Configuration DPO
         config = build_dpo_config(DPO_CHECKPOINT)
-        config.beta = args.beta
-        config.num_train_epochs = args.epochs
 
         # DPOTrainer
         # ref_model=None : TRL utilise le modèle SFT fusionné (sans adaptateur DPO) comme référence.
@@ -328,9 +410,9 @@ def main() -> None:
             {
                 "model_name": MODEL_NAME,
                 "sft_checkpoint": str(SFT_CHECKPOINT),
-                "beta": args.beta,
+                "beta": BETA,
                 "learning_rate": LEARNING_RATE,
-                "epochs": args.epochs,
+                "epochs": EPOCHS,
                 "batch_size": BATCH_SIZE,
                 "gradient_accumulation": GRAD_ACCUM,
                 "lora_r": LORA_R,
@@ -359,16 +441,15 @@ def main() -> None:
         tokenizer.save_pretrained(str(DPO_CHECKPOINT))
         logger.info("Adaptateur LoRA DPO sauvegardé dans %s", DPO_CHECKPOINT)
 
-        # Enregistrement du modèle dans MLflow (attache l'adapter au run + Model Registry).
-        # Les fichiers top-level du checkpoint sont copiés dans mlruns/ (~100 MB).
-        # Les sous-dossiers checkpoint-N/ (sauvegardes intermédiaires) sont exclus.
-        adapter_files = {f.name: str(f) for f in DPO_CHECKPOINT.iterdir() if f.is_file()}
-        mlflow.pyfunc.log_model(
+        # pip_requirements is set explicitly to bypass mlflow's auto-detection,
+        # which tries to import tensorflow (not installed) and crashes.
+        mlflow.transformers.log_model(
+            transformers_model={"model": model, "tokenizer": tokenizer},
             artifact_path="adapter",
-            python_model=_LoraAdapterModel(),
-            artifacts=adapter_files,
+            task="text-generation",
             registered_model_name=REGISTERED_MODEL_NAME,
             metadata={"base_model": MODEL_NAME, "lora_r": LORA_R, "beta": BETA, "stage": "dpo"},
+            pip_requirements=["transformers", "torch", "peft", "accelerate"],
         )
 
     logger.info("=== Entraînement DPO terminé. ===")

@@ -1,107 +1,158 @@
-"""Script 10 — Préparation du tokenizer et formatage prompt/completion pour SFT."""
+"""Script 10 — Tokenizer preparation and prompt/completion formatting for SFT."""
 
 import argparse
+import os
 import sys
+from functools import partial
 from pathlib import Path
 
 import numpy as np
+from dotenv import load_dotenv
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import pandas as pd
+load_dotenv(dotenv_path=_SCRIPTS_DIR.parent / ".env", override=False)
+
 from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
-from utils import format_chat_prompt, get_logger
+from utils import get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 
-# ── Constantes ────────────────────────────────────────────────────────────────
+# ── Constants ─────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "unsloth/Qwen3-1.7B-Base"
+MODEL_NAME = os.getenv("MODEL_NAME", "unsloth/Qwen3-1.7B")
 MAX_SEQ_LENGTH = 1024
+
+# Number of CPU cores for .map() on pure-Python transforms.
+# Keep num_proc=1 for tokenization: HF fast tokenizers use Rust parallelism
+# internally — combining with fork(num_proc>1) causes deadlocks.
+NUM_PROC = 4
 
 SFT_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "sft"
 TOKENIZED_DIR = PROJECT_ROOT / "data" / "processed" / "sft_tokenized"
 
-CHAT_MARKER = "<|im_start|>assistant\n"
+
+# ── Batch transform functions ──────────────────────────────────────────────────
+# Module-level functions are picklable, which is required for num_proc > 1.
 
 
-# ── Fonctions ─────────────────────────────────────────────────────────────────
+def _format_batch(
+    batch: dict[str, list],
+    tokenizer: PreTrainedTokenizerFast,
+) -> dict[str, list]:
+    """Format a batch of SFT rows into prompt/completion pairs.
 
+    Uses ``tokenizer.apply_chat_template`` as the single source of truth for
+    special tokens (BOS, EOS, role markers). The prompt boundary is derived by
+    applying the template twice:
 
-def load_tokenizer(model_name: str) -> PreTrainedTokenizerFast:
-    """Charge le tokenizer depuis HuggingFace Hub.
+    1. ``[user]`` + ``add_generation_prompt=True``  → exact prompt text
+    2. ``[user, assistant]``                         → full text
 
-    Configure padding_side="right" (requis pour SFT causal).
-    Assigne pad_token = eos_token si absent.
-
-    Args:
-        model_name: Identifiant du modèle sur HuggingFace Hub.
-
-    Returns:
-        Tokenizer configuré.
-    """
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.padding_side = "right"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
-
-
-def format_to_prompt_completion(df: pd.DataFrame) -> Dataset:
-    """Convertit un DataFrame SFT en Dataset HF au format prompt/completion.
-
-    Le format prompt/completion est natif à TRL 0.29 SFTTrainer et active
-    automatiquement le masquage de loss sur la partie prompt.
+    completion = full_text[len(prompt_text):]  — no fragile string search.
 
     Args:
-        df: DataFrame avec colonnes instruction, response, urgency_level.
+        batch: Dict of lists with keys ``instruction``, ``response``,
+            and ``urgency_level``, as provided by ``Dataset.map(batched=True)``.
+        tokenizer: Loaded tokenizer whose chat template drives the formatting.
 
     Returns:
-        HuggingFace Dataset avec colonnes prompt, completion, urgency_level.
+        Dict of lists with keys ``prompt``, ``completion``, ``urgency_level``.
     """
-    records: list[dict[str, str]] = []
-    for _, row in df.iterrows():
-        full_text = format_chat_prompt(str(row["instruction"]), str(row["response"]))
-        idx = full_text.index(CHAT_MARKER) + len(CHAT_MARKER)
-        records.append(
-            {
-                "prompt": full_text[:idx],
-                "completion": full_text[idx:],
-                "urgency_level": str(row["urgency_level"]),
-            }
+    prompts: list[str] = []
+    completions: list[str] = []
+    for instruction, response in zip(batch["instruction"], batch["response"], strict=True):
+        prompt_text: str = tokenizer.apply_chat_template(  # type: ignore[assignment]
+            [{"role": "user", "content": str(instruction)}],
+            tokenize=False,
+            add_generation_prompt=True,
         )
-    return Dataset.from_list(records)
+        full_text: str = tokenizer.apply_chat_template(  # type: ignore[assignment]
+            [
+                {"role": "user", "content": str(instruction)},
+                {"role": "assistant", "content": str(response)},
+            ],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        prompts.append(prompt_text)
+        completions.append(full_text[len(prompt_text) :])
+    return {
+        "prompt": prompts,
+        "completion": completions,
+        "urgency_level": batch["urgency_level"],
+    }
+
+
+def _compute_length_batch(
+    batch: dict[str, list],
+    tokenizer: PreTrainedTokenizerFast,
+) -> dict[str, list]:
+    """Compute token length for each example in a batch.
+
+    Uses ``apply_chat_template`` to build the exact string the model will see,
+    then tokenizes without truncation to measure real lengths.
+
+    Called with ``num_proc=1`` to avoid deadlocks between HF fast tokenizer
+    (Rust parallelism) and Python multiprocessing (fork).
+
+    Args:
+        batch: Dict of lists with keys ``instruction`` and ``response``.
+        tokenizer: Loaded tokenizer; truncation is disabled to measure real lengths.
+
+    Returns:
+        Dict with a single key ``_length`` containing token counts per example.
+    """
+    lengths: list[int] = []
+    for instruction, response in zip(batch["instruction"], batch["response"], strict=True):
+        full_text: str = tokenizer.apply_chat_template(  # type: ignore[assignment]
+            [
+                {"role": "user", "content": str(instruction)},
+                {"role": "assistant", "content": str(response)},
+            ],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        tokens = tokenizer(full_text, truncation=False)["input_ids"]  # type: ignore[call-overload]
+        lengths.append(len(tokens))  # type: ignore[arg-type]
+    return {"_length": lengths}
+
+
+# ── Analysis ──────────────────────────────────────────────────────────────────
 
 
 def analyze_lengths(
-    df: pd.DataFrame,
+    ds: Dataset,
     tokenizer: PreTrainedTokenizerFast,
     max_seq_length: int = MAX_SEQ_LENGTH,
 ) -> dict[str, int | float]:
-    """Analyse la distribution des longueurs de tokens sur le dataset.
+    """Compute token-length distribution statistics for a dataset split.
 
-    Tokenise chaque exemple complet (système + instruction + réponse) sans
-    troncature pour mesurer les longueurs réelles.
+    Adds a temporary ``_length`` column via ``Dataset.map(batched=True)`` then
+    reads it column-by-column — no DataFrame allocation.
 
     Args:
-        df: DataFrame SFT avec colonnes instruction et response.
-        tokenizer: Tokenizer chargé.
-        max_seq_length: Seuil pour compter les exemples tronqués.
+        ds: Dataset split with ``instruction`` and ``response`` columns.
+        tokenizer: Loaded tokenizer.
+        max_seq_length: Threshold above which examples are counted as truncated.
 
     Returns:
-        Dictionnaire avec p50, p75, p90, p95, p99, max, mean.
+        Dict with p50, p75, p90, p95, p99, max, mean, n_truncated, pct_truncated.
     """
-    lengths: list[int] = []
-    for _, row in df.iterrows():
-        text = format_chat_prompt(str(row["instruction"]), str(row["response"]))
-        tokens = tokenizer(text, truncation=False)["input_ids"]  # type: ignore[call-overload]
-        lengths.append(len(tokens))  # type: ignore[reportArgumentType]
+    ds_with_len = ds.map(
+        partial(_compute_length_batch, tokenizer=tokenizer),
+        batched=True,
+        batch_size=256,
+        num_proc=1,  # fast tokenizer: Rust parallelism — no fork
+        desc="Computing token lengths",
+    )
+    arr = np.array(ds_with_len["_length"])
 
-    arr = np.array(lengths)
-    stats = {
+    n_truncated = int((arr > max_seq_length).sum())
+    return {
         "p50": int(np.percentile(arr, 50)),
         "p75": int(np.percentile(arr, 75)),
         "p90": int(np.percentile(arr, 90)),
@@ -109,94 +160,136 @@ def analyze_lengths(
         "p99": int(np.percentile(arr, 99)),
         "max": int(arr.max()),
         "mean": float(arr.mean()),
+        "n_truncated": n_truncated,
+        "pct_truncated": round(n_truncated / len(arr) * 100, 2),
     }
 
-    n_truncated = int((arr > max_seq_length).sum())
-    stats["n_truncated"] = n_truncated
-    stats["pct_truncated"] = round(n_truncated / len(arr) * 100, 2)
 
-    return stats
+# ── Formatting ────────────────────────────────────────────────────────────────
+
+
+def format_to_prompt_completion(ds: Dataset, tokenizer: PreTrainedTokenizerFast) -> Dataset:
+    """Convert an SFT Dataset split to prompt/completion format.
+
+    The prompt/completion format is native to TRL 0.29 SFTTrainer and
+    automatically enables loss masking on the prompt portion.
+
+    Args:
+        ds: Dataset split with ``instruction``, ``response``, and
+            ``urgency_level`` columns.
+        tokenizer: Loaded tokenizer whose chat template drives the formatting.
+
+    Returns:
+        Dataset with ``prompt``, ``completion``, and ``urgency_level`` columns.
+    """
+    return ds.map(
+        partial(_format_batch, tokenizer=tokenizer),
+        batched=True,
+        batch_size=1000,
+        num_proc=NUM_PROC,
+        remove_columns=[c for c in ds.column_names if c not in ("urgency_level",)],
+        desc="Formatting prompt/completion",
+    )
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
-    """Pipeline de préparation : analyse des longueurs + formatage prompt/completion.
+    """Preparation pipeline: length analysis + prompt/completion formatting.
 
-    Idempotent : skip si TOKENIZED_DIR/train existe déjà.
+    Idempotent: skips if TOKENIZED_DIR/train already exists.
     """
-    parser = argparse.ArgumentParser(description="Préparation tokenizer + formatage SFT")
-    parser.add_argument("--verbose", action="store_true", help="Logging DEBUG")
+    parser = argparse.ArgumentParser(description="Tokenizer preparation + SFT formatting")
+    parser.add_argument("--verbose", action="store_true", help="Enable DEBUG logging")
     args = parser.parse_args()
 
     logger = get_logger("10_prepare_tokenizer", verbose=args.verbose)
 
     # Idempotence
     if (TOKENIZED_DIR / "train").exists():
-        logger.info("Datasets tokenisés déjà présents dans %s — skip.", TOKENIZED_DIR)
+        logger.info("Tokenized datasets already present in %s — skip.", TOKENIZED_DIR)
         return
 
-    # Vérification du dataset source
     if not SFT_FINAL_DIR.exists():
-        logger.error("Dataset manquant : %s. Lancer le pipeline S1 d'abord.", SFT_FINAL_DIR)
+        logger.error("Missing dataset: %s. Run the S1 pipeline first.", SFT_FINAL_DIR)
         sys.exit(1)
 
-    # Chargement du tokenizer
-    logger.info("Chargement du tokenizer depuis %s...", MODEL_NAME)
-    tokenizer = load_tokenizer(MODEL_NAME)
+    # Load tokenizer
+    logger.info("Loading tokenizer from %s...", MODEL_NAME)
+    tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer.padding_side = "right"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Qwen3-Base has no chat_template in its tokenizer_config.json (base ≠ instruct).
+    # apply_chat_template raises ValueError if the attribute is absent, so we inject
+    # the standard Qwen3 ChatML template that all instruct variants use.
+    if not tokenizer.chat_template:
+        tokenizer.chat_template = (
+            "{% for message in messages %}"
+            "{{'<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n'}}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+        )
+        logger.info(
+            "chat_template not found on base model — injected standard Qwen3 ChatML template."
+        )
+
     logger.info(
-        "Tokenizer chargé. Vocab size : %d, pad_token : '%s'",
+        "Tokenizer loaded. Vocab size: %d, pad_token: '%s'",
         tokenizer.vocab_size,
         tokenizer.pad_token,
     )
 
-    # Chargement des splits
-    logger.info("Chargement des splits depuis %s...", SFT_FINAL_DIR)
-    sft = DatasetDict(load_from_disk(str(SFT_FINAL_DIR)))  # type: ignore[arg-type]
-    df_train = pd.DataFrame(sft["train"].to_pandas())
-    df_val = pd.DataFrame(sft["val"].to_pandas())
-    df_test = pd.DataFrame(sft["test"].to_pandas())
-    logger.info("  train: %d | val: %d | test: %d", len(df_train), len(df_val), len(df_test))
+    # Load splits directly as Dataset — no pandas conversion
+    logger.info("Loading splits from %s...", SFT_FINAL_DIR)
+    sft: DatasetDict = DatasetDict(load_from_disk(str(SFT_FINAL_DIR)))  # type: ignore[arg-type]
+    ds_train: Dataset = sft["train"]
+    ds_val: Dataset = sft["val"]
+    ds_test: Dataset = sft["test"]
+    logger.info("  train: %d | val: %d | test: %d", len(ds_train), len(ds_val), len(ds_test))
 
-    # Analyse des longueurs sur le train set
-    logger.info("Analyse des longueurs de tokens (train set)...")
-    stats = analyze_lengths(df_train, tokenizer, MAX_SEQ_LENGTH)
-    logger.info("Distribution des longueurs :")
+    # Token-length analysis on train set
+    logger.info("Analysing token lengths (train set)...")
+    stats = analyze_lengths(ds_train, tokenizer, MAX_SEQ_LENGTH)
+    logger.info("Length distribution:")
     for key in ["p50", "p75", "p90", "p95", "p99", "max", "mean"]:
-        logger.info("  %s : %s", key, stats[key])
+        logger.info("  %s: %s", key, stats[key])
 
     if stats["n_truncated"] > 0:
         logger.warning(
-            "%d exemples (%.1f%%) dépassent MAX_SEQ_LENGTH=%d et seront tronqués.",
+            "%d examples (%.1f%%) exceed MAX_SEQ_LENGTH=%d and will be truncated.",
             stats["n_truncated"],
             stats["pct_truncated"],
             MAX_SEQ_LENGTH,
         )
     else:
-        logger.info("Aucun exemple ne dépasse MAX_SEQ_LENGTH=%d.", MAX_SEQ_LENGTH)
+        logger.info("No examples exceed MAX_SEQ_LENGTH=%d.", MAX_SEQ_LENGTH)
 
-    # Recommandation de MAX_SEQ_LENGTH
     if stats["p95"] <= 512:
-        logger.info("Recommandation : MAX_SEQ_LENGTH=512 suffirait (p95=%d).", stats["p95"])
+        logger.info("Recommendation: MAX_SEQ_LENGTH=512 is sufficient (p95=%d).", stats["p95"])
     elif stats["p95"] <= 1024:
-        logger.info("Recommandation : MAX_SEQ_LENGTH=1024 est adapté (p95=%d).", stats["p95"])
+        logger.info("Recommendation: MAX_SEQ_LENGTH=1024 is appropriate (p95=%d).", stats["p95"])
     else:
-        logger.info("Recommandation : MAX_SEQ_LENGTH=2048 nécessaire (p95=%d).", stats["p95"])
+        logger.info("Recommendation: MAX_SEQ_LENGTH=2048 required (p95=%d).", stats["p95"])
 
-    # Formatage prompt/completion
-    logger.info("Formatage en prompt/completion...")
+    # Format to prompt/completion
+    logger.info("Formatting splits to prompt/completion...")
     splits = {
-        "train": format_to_prompt_completion(df_train),
-        "val": format_to_prompt_completion(df_val),
-        "test": format_to_prompt_completion(df_test),
+        "train": format_to_prompt_completion(ds_train, tokenizer),
+        "val": format_to_prompt_completion(ds_val, tokenizer),
+        "test": format_to_prompt_completion(ds_test, tokenizer),
     }
 
-    # Sauvegarde
+    # Save
     TOKENIZED_DIR.mkdir(parents=True, exist_ok=True)
     for name, ds in splits.items():
         out_path = TOKENIZED_DIR / name
         ds.save_to_disk(str(out_path))
-        logger.info("  %s : %d exemples sauvegardés dans %s", name, len(ds), out_path)
+        logger.info("  %s: %d examples saved to %s", name, len(ds), out_path)
 
-    logger.info("=== Préparation terminée. ===")
+    logger.info("=== Preparation complete. ===")
 
 
 if __name__ == "__main__":

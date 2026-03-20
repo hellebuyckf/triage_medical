@@ -1,10 +1,13 @@
 """Script 11 — Entraînement SFT de Qwen3-1.7B avec LoRA via Unsloth + TRL."""
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
 import torch
+import yaml
 
 # Workaround : Unsloth patche Qwen3 avec des forward produisant des tenseurs non-contigus.
 # cuBLAS standard crash sur ces tenseurs, cublasLt les gère correctement.
@@ -15,7 +18,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 try:
-    from unsloth import FastLanguageModel
+    from unsloth import FastLanguageModel, is_bfloat16_supported
 except ImportError:
     print(
         "Unsloth n'est pas installé. Installer avec :\n"
@@ -26,17 +29,19 @@ except ImportError:
     sys.exit(1)
 
 import mlflow
-import mlflow.pyfunc
+import mlflow.transformers
 from datasets import load_from_disk
+from dotenv import load_dotenv
 from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import SFTConfig, SFTTrainer
 from utils import get_latest_checkpoint, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "unsloth/Qwen3-1.7B-Base"
+MODEL_NAME = os.getenv("MODEL_NAME", "unsloth/Qwen3-1.7B")
 TOKENIZED_DIR = PROJECT_ROOT / "data" / "processed" / "sft_tokenized"
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "sft"
 
@@ -56,22 +61,23 @@ MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
 REGISTERED_MODEL_NAME = "sft-qwen3-1.7b-triage"
 
 
-# ── MLflow model wrapper ───────────────────────────────────────────────────────
+# ── Config loader ──────────────────────────────────────────────────────────────
 
 
-class _LoraAdapterModel(mlflow.pyfunc.PythonModel):
-    """Pointeur MLflow vers un adaptateur LoRA SFT.
+def load_training_config(config_path: Path) -> dict:
+    """Load hyperparameters from a YAML config file.
 
-    Permet d'attacher l'adapter au run et de l'enregistrer dans le Model Registry.
-    Le chargement réel se fait via PEFT :
-        PeftModel.from_pretrained(base_model, context.artifacts["adapter_dir"])
+    Args:
+        config_path: Path to the YAML config file.
+
+    Returns:
+        Parsed config dict with keys 'training' and 'lora'.
     """
-
-    def predict(self, context, model_input, params=None):
-        raise NotImplementedError(
-            "Charger via PEFT : "
-            "PeftModel.from_pretrained(base_model, context.artifacts['adapter_dir'])"
-        )
+    if not config_path.exists():
+        print(f"Config file not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+    with config_path.open() as f:
+        return yaml.safe_load(f)
 
 
 # ── Fonctions ─────────────────────────────────────────────────────────────────
@@ -133,8 +139,8 @@ def build_sft_config(output_dir: Path) -> SFTConfig:
         lr_scheduler_type="cosine",
         warmup_steps=50,
         weight_decay=0.01,
-        fp16=False,
-        bf16=True,
+        fp16=not is_bfloat16_supported(),
+        bf16=is_bfloat16_supported(),
         gradient_checkpointing=True,
         logging_steps=50,
         eval_strategy="steps",
@@ -150,7 +156,9 @@ def build_sft_config(output_dir: Path) -> SFTConfig:
         seed=SEED,
         max_length=MAX_SEQ_LENGTH,
         packing=False,
-        dataset_text_field="text",
+        # TRL 0.29 native prompt/completion masking: loss is computed only on
+        # completion tokens when the dataset has "prompt" and "completion" columns.
+        completion_only_loss=True,
     )
 
 
@@ -161,12 +169,16 @@ def build_trainer(
     val_dataset,
     config: SFTConfig,
 ) -> SFTTrainer:
-    """Instancie le SFTTrainer.
+    """Instancie le SFTTrainer avec masquage de loss sur le prompt.
+
+    TRL 0.29 handles prompt masking natively via ``completion_only_loss=True``
+    in ``SFTConfig`` when the dataset exposes ``prompt`` and ``completion`` columns.
+    No custom data collator is needed.
 
     Args:
         model: Modèle avec adaptateur LoRA.
         tokenizer: Tokenizer configuré.
-        train_dataset: Dataset d'entraînement (colonne text = ChatML complet).
+        train_dataset: Dataset with ``prompt`` and ``completion`` columns.
         val_dataset: Dataset de validation.
         config: Configuration SFT.
 
@@ -214,7 +226,31 @@ def main() -> None:
     """
     parser = argparse.ArgumentParser(description="Entraînement SFT LoRA")
     parser.add_argument("--verbose", action="store_true", help="Logging DEBUG")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=PROJECT_ROOT / "configs" / "sft.yaml",
+        help="Chemin vers le fichier de config YAML (défaut: configs/sft.yaml)",
+    )
     args = parser.parse_args()
+
+    cfg = load_training_config(args.config)
+    t = cfg["training"]
+    lora = cfg["lora"]
+
+    global MAX_SEQ_LENGTH, LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES
+    global LEARNING_RATE, EPOCHS, BATCH_SIZE, GRAD_ACCUM, SEED
+
+    MAX_SEQ_LENGTH = t["max_seq_length"]
+    LORA_R = lora["r"]
+    LORA_ALPHA = lora["alpha"]
+    LORA_DROPOUT = lora["dropout"]
+    LORA_TARGET_MODULES = lora["target_modules"]
+    LEARNING_RATE = t["learning_rate"]
+    EPOCHS = t["epochs"]
+    BATCH_SIZE = t["batch_size"]
+    GRAD_ACCUM = t["grad_accum"]
+    SEED = t["seed"]
 
     logger = get_logger("11_train_sft", verbose=args.verbose)
     set_seed(SEED)
@@ -269,10 +305,7 @@ def main() -> None:
         # Configuration SFT + Trainer
         config = build_sft_config(CHECKPOINT_DIR)
         trainer = build_trainer(model, tokenizer, train_dataset, val_dataset, config)
-
-        # Note : la loss est calculée sur toute la séquence (prompt + réponse).
-        # Impact pour un POC : léger surapprentissage du format prompt, acceptable à 4660 exemples.
-        logger.info("Entraînement sur séquence complète (pas de loss masking).")
+        logger.info("Loss masking enabled: gradient computed on completion tokens only.")
 
         # Log des hyperparamètres
         mlflow.log_params(
@@ -310,16 +343,37 @@ def main() -> None:
         tokenizer.save_pretrained(str(CHECKPOINT_DIR))
         logger.info("Adaptateur LoRA sauvegardé dans %s", CHECKPOINT_DIR)
 
-        # Enregistrement du modèle dans MLflow (attache l'adapter au run + Model Registry).
-        # Les fichiers top-level du checkpoint sont copiés dans mlruns/ (~100 MB).
-        # Les sous-dossiers checkpoint-N/ (sauvegardes intermédiaires) sont exclus.
-        adapter_files = {f.name: str(f) for f in CHECKPOINT_DIR.iterdir() if f.is_file()}
-        mlflow.pyfunc.log_model(
+        # Sauvegarde des hyperparamètres d'entraînement pour les rapports d'évaluation
+        training_config = {
+            "model_name": MODEL_NAME,
+            "lora_r": LORA_R,
+            "lora_alpha": LORA_ALPHA,
+            "lora_dropout": LORA_DROPOUT,
+            "lora_target_modules": LORA_TARGET_MODULES,
+            "learning_rate": LEARNING_RATE,
+            "epochs": EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "grad_accum": GRAD_ACCUM,
+            "max_seq_length": MAX_SEQ_LENGTH,
+            "seed": SEED,
+        }
+        (CHECKPOINT_DIR / "training_config.json").write_text(
+            json.dumps(training_config, indent=2), encoding="utf-8"
+        )
+        logger.info("Hyperparamètres sauvegardés dans %s/training_config.json", CHECKPOINT_DIR)
+
+        # Log the PEFT model natively — mlflow.transformers handles PeftModel
+        # serialisation, tokenizer packaging, and Model Registry registration
+        # without any custom wrapper class.
+        # pip_requirements is set explicitly to bypass mlflow's auto-detection,
+        # which tries to import tensorflow (not installed) and crashes.
+        mlflow.transformers.log_model(
+            transformers_model={"model": model, "tokenizer": tokenizer},
             artifact_path="adapter",
-            python_model=_LoraAdapterModel(),
-            artifacts=adapter_files,
+            task="text-generation",
             registered_model_name=REGISTERED_MODEL_NAME,
             metadata={"base_model": MODEL_NAME, "lora_r": LORA_R, "stage": "sft"},
+            pip_requirements=["transformers", "torch", "peft", "accelerate"],
         )
 
     logger.info("=== Entraînement SFT terminé. ===")

@@ -5,6 +5,7 @@ de comparaison avant/après alignement avec exemples qualitatifs.
 """
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -22,6 +23,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import mlflow
 import pandas as pd
 from datasets import DatasetDict, load_from_disk
+from dotenv import load_dotenv
 from peft import PeftModel
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, fbeta_score, recall_score
 from tqdm import tqdm
@@ -32,19 +34,20 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 from utils import (
+    SYSTEM_PROMPT,
     extract_urgency_from_response,
-    format_chat_prompt,
     get_logger,
 )
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "unsloth/Qwen3-1.7B-Base"
+MODEL_NAME = os.getenv("MODEL_NAME", "unsloth/Qwen3-1.7B")
 SFT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "sft"
 DPO_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "dpo"
-REPORT_PATH = DPO_CHECKPOINT / "eval_report.md"
+REPORTS_DIR = PROJECT_ROOT / "reports" / "dpo"
 
 SFT_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "sft"
 DPO_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "dpo"
@@ -53,6 +56,7 @@ MAX_SEQ_LENGTH = 1024
 MAX_NEW_TOKENS = 512
 DO_SAMPLE = False
 N_EXAMPLES = 5  # exemples de comparaison qualitative SFT vs DPO
+BATCH_SIZE_EVAL = 8  # exemples par batch GPU — réduire à 4 ou 2 si CUDA OOM
 SEED = 42
 
 URGENCY_LABELS = ["max", "moderate", "deferred"]
@@ -84,39 +88,6 @@ def _strip_artifacts(text: str) -> str:
 # ── Fonctions ─────────────────────────────────────────────────────────────────
 
 
-@mlflow.trace(span_type="RETRIEVER", name="load_model")
-def load_model(
-    model_name: str,
-    checkpoint_dir: Path,
-) -> tuple[PreTrainedModel, PreTrainedTokenizerFast]:
-    """Charge le modèle de base et applique les poids LoRA depuis checkpoint_dir.
-
-    Utilise AutoModelForCausalLM (pas Unsloth) pour éviter les patchs Qwen3
-    qui produisent des tenseurs non-contigus lors de model.generate().
-
-    Args:
-        model_name: Identifiant HuggingFace du modèle de base.
-        checkpoint_dir: Répertoire contenant adapter_model.safetensors.
-
-    Returns:
-        Tuple (modèle en mode inférence, tokenizer).
-    """
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    base = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-    )
-    model = PeftModel.from_pretrained(base, str(checkpoint_dir))
-    model.eval()
-    model.generation_config.max_length = None  # type: ignore[reportAttributeAccessIssue]
-    return model, tokenizer  # type: ignore[reportReturnType]
-
-
 @mlflow.trace(span_type="RETRIEVER", name="load_sft_merged_for_dpo_eval")
 def load_sft_merged_for_dpo_eval(
     model_name: str,
@@ -141,6 +112,15 @@ def load_sft_merged_for_dpo_eval(
     tokenizer.padding_side = "left"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    # Qwen3-Base n'a pas de chat_template — on injecte le template ChatML standard
+    # pour que apply_chat_template fonctionne dans generate_responses_batch.
+    if not tokenizer.chat_template:
+        tokenizer.chat_template = (
+            "{% for message in messages %}"
+            "{{'<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n'}}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+        )
 
     # 1. Charger le modèle de base
     base = AutoModelForCausalLM.from_pretrained(
@@ -160,52 +140,89 @@ def load_sft_merged_for_dpo_eval(
     return model, tokenizer  # type: ignore[reportReturnType]
 
 
-def generate_response(
+def generate_responses_batch(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizerFast,
-    instruction: str,
+    instructions: list[str],
     max_new_tokens: int = MAX_NEW_TOKENS,
-) -> str:
-    """Génère une réponse en mode greedy depuis une instruction.
+    batch_size: int = BATCH_SIZE_EVAL,
+) -> tuple[list[str], int]:
+    """Génère des réponses pour une liste d'instructions par batches GPU.
+
+    Envoie ``batch_size`` prompts en parallèle à ``model.generate()``, saturant
+    le GPU au lieu d'une passe par exemple. Le left-padding (défini dans
+    ``load_sft_merged_for_dpo_eval``) aligne toutes les séquences d'un batch.
+
+    Compatible avec ``model.disable_adapter()`` : le contexte d'appel détermine
+    si le LoRA DPO est actif (DPO) ou désactivé (SFT fusionné).
 
     Args:
-        model: Modèle (SFT ou DPO) prêt pour l'inférence.
-        tokenizer: Tokenizer associé.
-        instruction: Texte de l'instruction médicale.
-        max_new_tokens: Nombre max de tokens à générer.
+        model: Modèle (base + SFT merged + DPO LoRA) en mode éval.
+        tokenizer: Tokenizer avec ``padding_side="left"``.
+        instructions: Liste des instructions médicales à évaluer.
+        max_new_tokens: Tokens maximum à générer par exemple.
+        batch_size: Exemples par batch GPU.
 
     Returns:
-        Texte de la réponse générée (sans le prompt, tronqué au premier <|im_end|>).
+        Tuple (réponses, n_oom) où ``réponses[i]`` correspond à ``instructions[i]``
+        et ``n_oom`` compte les exemples sautés pour CUDA OOM.
     """
-    prompt = format_chat_prompt(instruction, response="")
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)  # type: ignore[reportCallIssue]
-    input_length = inputs["input_ids"].shape[1]  # type: ignore[reportAttributeAccessIssue]
+    im_end_id: int = tokenizer.convert_tokens_to_ids("<|im_end|>")  # type: ignore[assignment]
+    responses: list[str] = [""] * len(instructions)
+    n_oom = 0
 
-    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    stop_ids: list[int] = [im_end_id]  # type: ignore[reportAssignmentType]
-    if tokenizer.eos_token_id is not None and tokenizer.eos_token_id != im_end_id:
-        stop_ids.append(tokenizer.eos_token_id)  # type: ignore[reportArgumentType]
+    for batch_start in tqdm(range(0, len(instructions), batch_size), desc="Generating"):
+        batch = instructions[batch_start : batch_start + batch_size]
 
-    with torch.no_grad():
-        output_ids = model.generate(  # type: ignore[reportCallIssue]
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=DO_SAMPLE,
-            temperature=1.0,
-            eos_token_id=stop_ids,
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-            repetition_penalty=1.1,
-        )
+        prompts = [
+            str(
+                tokenizer.apply_chat_template(  # type: ignore[union-attr]
+                    [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": instr},
+                    ],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+            for instr in batch
+        ]
 
-    generated_ids = output_ids[0][input_length:]
-    for stop_id in stop_ids:
-        positions = (generated_ids == stop_id).nonzero(as_tuple=True)[0]
-        if len(positions) > 0:
-            generated_ids = generated_ids[: positions[0]]
-            break
+        inputs = tokenizer(  # type: ignore[call-overload]
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=MAX_SEQ_LENGTH,
+        ).to(model.device)  # type: ignore[union-attr]
+        input_length: int = inputs["input_ids"].shape[1]  # type: ignore[index]
 
-    text = str(tokenizer.decode(generated_ids, skip_special_tokens=True))
-    return _strip_artifacts(text)
+        try:
+            with torch.no_grad():
+                output_ids = model.generate(  # type: ignore[reportCallIssue]
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=DO_SAMPLE,
+                    temperature=1.0,
+                    eos_token_id=im_end_id,
+                    repetition_penalty=1.1,
+                )
+        except RuntimeError as exc:
+            if "CUDA out of memory" in str(exc):
+                n_oom += len(batch)
+                torch.cuda.empty_cache()
+                continue  # responses stay "" for this batch
+            raise
+
+        for i in range(len(batch)):
+            gen_ids = output_ids[i][input_length:]
+            eos_pos = (gen_ids == im_end_id).nonzero(as_tuple=True)[0]
+            if len(eos_pos) > 0:
+                gen_ids = gen_ids[: eos_pos[0]]
+            text = str(tokenizer.decode(gen_ids, skip_special_tokens=True))
+            responses[batch_start + i] = _strip_artifacts(text)
+
+    return responses, n_oom
 
 
 def check_format_compliance(text: str) -> bool:
@@ -228,16 +245,21 @@ def evaluate_split(
     df: pd.DataFrame,
     split_name: str,
     n_eval: int | None = None,
+    batch_size: int = BATCH_SIZE_EVAL,
     logger=None,
 ) -> dict:
-    """Évalue l'accuracy de classification d'urgence sur un split SFT.
+    """Évalue l'accuracy de classification d'urgence sur un split via batch generation.
+
+    Appelle ``generate_responses_batch`` pour saturer le GPU. Compatible avec
+    ``model.disable_adapter()`` : le contexte d'appel détermine le mode SFT ou DPO.
 
     Args:
-        model: Modèle à évaluer (SFT ou DPO).
-        tokenizer: Tokenizer associé.
+        model: Modèle à évaluer (adaptateur actif ou désactivé selon le contexte).
+        tokenizer: Tokenizer avec ``padding_side="left"``.
         df: DataFrame SFT avec colonnes [instruction, urgency_level].
-        split_name: Nom du split pour les logs.
+        split_name: Nom du split pour les logs et MLflow.
         n_eval: Nombre d'exemples à évaluer (None = tous).
+        batch_size: Exemples par batch GPU.
         logger: Logger optionnel.
 
     Returns:
@@ -245,28 +267,25 @@ def evaluate_split(
     """
     if n_eval is not None and n_eval < len(df):
         df = df.sample(n=n_eval, random_state=SEED).reset_index(drop=True)
+        if logger:
+            logger.info("[%s] Sous-échantillon de %d exemples.", split_name, n_eval)
 
     n_total = len(df)
-    n_oom = 0
     predictions: list[dict] = []
 
     with mlflow.start_span(name=f"evaluate_split_{split_name}", span_type="CHAIN") as span:
         span.set_inputs({"split": split_name, "n_total": n_total, "n_requested": n_eval or n_total})
         t0 = time.monotonic()
 
-        for idx in tqdm(range(len(df)), desc=f"Éval {split_name}"):
-            row = df.iloc[idx]
-            try:
-                generated = generate_response(model, tokenizer, row["instruction"])
-            except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
-                    n_oom += 1
-                    if logger:
-                        logger.warning("OOM à l'exemple %d, skip.", idx)
-                    torch.cuda.empty_cache()
-                    generated = ""
-                else:
-                    raise
+        instructions: list[str] = list(df["instruction"])
+        generated_responses, n_oom = generate_responses_batch(
+            model, tokenizer, instructions, batch_size=batch_size
+        )
+        if n_oom > 0 and logger:
+            logger.warning("[%s] %d exemples sautés pour CUDA OOM.", split_name, n_oom)
+
+        for i, (_, row) in enumerate(df.iterrows()):
+            generated = generated_responses[i]
             predicted = extract_urgency_from_response(generated)
             predictions.append(
                 {
@@ -362,50 +381,57 @@ def evaluate_split(
 
 
 def compare_responses_on_dpo_val(
-    sft_model: PreTrainedModel,
-    dpo_model: PreTrainedModel,
+    model: PreTrainedModel,
     tokenizer: PreTrainedTokenizerFast,
     dpo_val_path: Path,
     n: int = N_EXAMPLES,
+    batch_size: int = BATCH_SIZE_EVAL,
     seed: int = SEED,
 ) -> list[dict]:
-    """Génère des réponses avec SFT et DPO sur les prompts du val DPO.
+    """Génère des réponses SFT et DPO sur les prompts du val DPO via batch generation.
 
-    Ces prompts sont issus d'UltraMedical-Preference et permettent d'observer
-    l'impact de l'alignement sur des questions médicales réelles.
+    Deux passes batch sur le même modèle :
+    1. SFT : ``model.disable_adapter()`` → poids SFT fusionnés, batch entier.
+    2. DPO : adaptateur actif → batch entier.
 
     Args:
-        sft_model: Modèle SFT.
-        dpo_model: Modèle DPO.
-        tokenizer: Tokenizer partagé.
+        model: Modèle unique (base + SFT merged + DPO LoRA).
+        tokenizer: Tokenizer avec ``padding_side="left"``.
         dpo_val_path: Répertoire du DatasetDict DPO (contient le split val).
         n: Nombre de comparaisons à générer.
+        batch_size: Exemples par batch GPU.
         seed: Graine pour le sous-échantillonnage.
 
     Returns:
-        Liste de dicts {prompt, sft_response, dpo_response}.
+        Liste de dicts {prompt, sft_response, dpo_response, chosen_reference}.
     """
     dpo = DatasetDict(load_from_disk(str(dpo_val_path)))  # type: ignore[arg-type]
     df = pd.DataFrame(dpo["val"].to_pandas()).sample(n=min(n, 100), random_state=seed).head(n)
-    comparisons = []
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Comparaisons SFT vs DPO"):
-        prompt = str(row["prompt"])
-        sft_resp = generate_response(sft_model, tokenizer, prompt)
-        dpo_resp = generate_response(dpo_model, tokenizer, prompt)
-        comparisons.append(
-            {
-                "prompt": prompt,
-                "sft_response": sft_resp,
-                "dpo_response": dpo_resp,
-                "chosen_reference": row.get("chosen", ""),
-            }
+    prompts = [str(row["prompt"]) for _, row in df.iterrows()]
+    chosen_refs = [str(row.get("chosen", "")) for _, row in df.iterrows()]
+
+    with model.disable_adapter():  # type: ignore[reportAttributeAccessIssue]
+        sft_responses, _ = generate_responses_batch(
+            model, tokenizer, prompts, batch_size=batch_size
         )
-    return comparisons
+    dpo_responses, _ = generate_responses_batch(model, tokenizer, prompts, batch_size=batch_size)
+
+    return [
+        {
+            "prompt": prompt,
+            "sft_response": sft_resp,
+            "dpo_response": dpo_resp,
+            "chosen_reference": chosen_ref,
+        }
+        for prompt, sft_resp, dpo_resp, chosen_ref in zip(
+            prompts, sft_responses, dpo_responses, chosen_refs, strict=True
+        )
+    ]
 
 
 def generate_dpo_eval_report(
-    sft_val_metrics: dict,
-    dpo_val_metrics: dict,
+    sft_val_metrics: dict | None,
+    dpo_val_metrics: dict | None,
     sft_test_metrics: dict,
     dpo_test_metrics: dict,
     comparisons: list[dict],
@@ -413,22 +439,59 @@ def generate_dpo_eval_report(
     """Génère un rapport Markdown de comparaison SFT vs DPO.
 
     Args:
-        sft_val_metrics: Métriques SFT sur val set.
-        dpo_val_metrics: Métriques DPO sur val set.
-        sft_test_metrics: Métriques SFT sur test set.
-        dpo_test_metrics: Métriques DPO sur test set.
+        sft_val_metrics: Métriques SFT sur val set, ou None si --eval-val non activé.
+        dpo_val_metrics: Métriques DPO sur val set, ou None si --eval-val non activé.
+        sft_test_metrics: Métriques SFT sur test set (toujours disponible).
+        dpo_test_metrics: Métriques DPO sur test set (toujours disponible).
         comparisons: Comparaisons qualitatives SFT vs DPO.
 
     Returns:
         Rapport complet en Markdown.
     """
 
-    def delta(a: float, b: float, pct: bool = False) -> str:
-        diff = b - a
+    def _fmt(m: dict | None) -> dict:
+        """Formate un dict de métriques en strings. Retourne 'N/A' si m est None."""
+        if m is None:
+            return {
+                k: "N/A"
+                for k in [
+                    "accuracy",
+                    "f1_macro",
+                    "recall_macro",
+                    "f2_macro",
+                    "format_compliance",
+                    "response_length_mean",
+                    "n_unparseable",
+                ]
+            }
+        return {
+            "accuracy": f"{m['accuracy']:.2%}",
+            "f1_macro": f"{m['f1_macro']:.4f}",
+            "recall_macro": f"{m['recall_macro']:.4f}",
+            "f2_macro": f"{m['f2_macro']:.4f}",
+            "format_compliance": f"{m['format_compliance']:.1%}",
+            "response_length_mean": f"{m['response_length_mean']:.0f}",
+            "n_unparseable": f"{m['n_unparseable']}/{m['n_evaluated']}",
+        }
+
+    def _delta(a: dict | None, b: dict | None, key: str, pct: bool = False) -> str:
+        """Calcule le delta entre deux métriques. Retourne 'N/A' si l'une est None."""
+        if a is None or b is None:
+            return "N/A"
+        diff = b[key] - a[key]
         sign = "+" if diff >= 0 else ""
-        if pct:
-            return f"{sign}{diff * 100:.1f}%"
-        return f"{sign}{diff:.4f}"
+        return f"{sign}{diff * 100:.1f}%" if pct else f"{sign}{diff:.4f}"
+
+    sv = _fmt(sft_val_metrics)
+    dv = _fmt(dpo_val_metrics)
+    st = _fmt(sft_test_metrics)
+    dt = _fmt(dpo_test_metrics)
+
+    val_note = (
+        ""
+        if (sft_val_metrics and dpo_val_metrics)
+        else ("\n\n*Non évalué (utiliser --eval-val pour générer).*")
+    )
 
     report = f"""# Rapport d'Évaluation DPO
 ## project14 — Agent de Triage Médical (Qwen3-1.7B + SFT + DPO)
@@ -440,42 +503,45 @@ def generate_dpo_eval_report(
 
 ---
 
-## 1. Métriques comparées — Val Set
+## 1. Métriques comparées — Val Set{val_note}
 
 | Métrique | SFT | DPO | Delta |
 |---|---|---|---|
-| Accuracy | {sft_val_metrics["accuracy"]:.2%} | {dpo_val_metrics["accuracy"]:.2%} | {delta(sft_val_metrics["accuracy"], dpo_val_metrics["accuracy"], pct=True)} |
-| F1 Macro | {sft_val_metrics["f1_macro"]:.4f} | {dpo_val_metrics["f1_macro"]:.4f} | {delta(sft_val_metrics["f1_macro"], dpo_val_metrics["f1_macro"])} |
-| Recall Macro | {sft_val_metrics["recall_macro"]:.4f} | {dpo_val_metrics["recall_macro"]:.4f} | {delta(sft_val_metrics["recall_macro"], dpo_val_metrics["recall_macro"])} |
-| F2 Macro (β=2) | {sft_val_metrics["f2_macro"]:.4f} | {dpo_val_metrics["f2_macro"]:.4f} | {delta(sft_val_metrics["f2_macro"], dpo_val_metrics["f2_macro"])} |
-| Format Compliance | {sft_val_metrics["format_compliance"]:.1%} | {dpo_val_metrics["format_compliance"]:.1%} | {delta(sft_val_metrics["format_compliance"], dpo_val_metrics["format_compliance"], pct=True)} |
-| Non-parseables | {sft_val_metrics["n_unparseable"]}/{sft_val_metrics["n_evaluated"]} | {dpo_val_metrics["n_unparseable"]}/{dpo_val_metrics["n_evaluated"]} | — |
-| Longueur réponse (mots) | {sft_val_metrics["response_length_mean"]:.0f} | {dpo_val_metrics["response_length_mean"]:.0f} | {delta(sft_val_metrics["response_length_mean"], dpo_val_metrics["response_length_mean"])} |
+| Accuracy | {sv["accuracy"]} | {dv["accuracy"]} | {_delta(sft_val_metrics, dpo_val_metrics, "accuracy", pct=True)} |
+| F1 Macro | {sv["f1_macro"]} | {dv["f1_macro"]} | {_delta(sft_val_metrics, dpo_val_metrics, "f1_macro")} |
+| Recall Macro | {sv["recall_macro"]} | {dv["recall_macro"]} | {_delta(sft_val_metrics, dpo_val_metrics, "recall_macro")} |
+| F2 Macro (β=2) | {sv["f2_macro"]} | {dv["f2_macro"]} | {_delta(sft_val_metrics, dpo_val_metrics, "f2_macro")} |
+| Format Compliance | {sv["format_compliance"]} | {dv["format_compliance"]} | {_delta(sft_val_metrics, dpo_val_metrics, "format_compliance", pct=True)} |
+| Non-parseables | {sv["n_unparseable"]} | {dv["n_unparseable"]} | — |
+| Longueur réponse (mots) | {sv["response_length_mean"]} | {dv["response_length_mean"]} | {_delta(sft_val_metrics, dpo_val_metrics, "response_length_mean")} |
 
 ## 2. Métriques comparées — Test Set
 
 | Métrique | SFT | DPO | Delta |
 |---|---|---|---|
-| Accuracy | {sft_test_metrics["accuracy"]:.2%} | {dpo_test_metrics["accuracy"]:.2%} | {delta(sft_test_metrics["accuracy"], dpo_test_metrics["accuracy"], pct=True)} |
-| F1 Macro | {sft_test_metrics["f1_macro"]:.4f} | {dpo_test_metrics["f1_macro"]:.4f} | {delta(sft_test_metrics["f1_macro"], dpo_test_metrics["f1_macro"])} |
-| Recall Macro | {sft_test_metrics["recall_macro"]:.4f} | {dpo_test_metrics["recall_macro"]:.4f} | {delta(sft_test_metrics["recall_macro"], dpo_test_metrics["recall_macro"])} |
-| F2 Macro (β=2) | {sft_test_metrics["f2_macro"]:.4f} | {dpo_test_metrics["f2_macro"]:.4f} | {delta(sft_test_metrics["f2_macro"], dpo_test_metrics["f2_macro"])} |
-| Format Compliance | {sft_test_metrics["format_compliance"]:.1%} | {dpo_test_metrics["format_compliance"]:.1%} | {delta(sft_test_metrics["format_compliance"], dpo_test_metrics["format_compliance"], pct=True)} |
+| Accuracy | {st["accuracy"]} | {dt["accuracy"]} | {_delta(sft_test_metrics, dpo_test_metrics, "accuracy", pct=True)} |
+| F1 Macro | {st["f1_macro"]} | {dt["f1_macro"]} | {_delta(sft_test_metrics, dpo_test_metrics, "f1_macro")} |
+| Recall Macro | {st["recall_macro"]} | {dt["recall_macro"]} | {_delta(sft_test_metrics, dpo_test_metrics, "recall_macro")} |
+| F2 Macro (β=2) | {st["f2_macro"]} | {dt["f2_macro"]} | {_delta(sft_test_metrics, dpo_test_metrics, "f2_macro")} |
+| Format Compliance | {st["format_compliance"]} | {dt["format_compliance"]} | {_delta(sft_test_metrics, dpo_test_metrics, "format_compliance", pct=True)} |
 
 ---
 
 ## 3. Matrice de confusion DPO (Val Set)
 
 """
-    cm_val = dpo_val_metrics.get("confusion_matrix")
-    if cm_val is not None:
-        report += "| | Prédit max | Prédit moderate | Prédit deferred |\n"
-        report += "|---|---|---|---|\n"
-        for i, label in enumerate(URGENCY_LABELS):
-            row_vals = " | ".join(str(cm_val[i][j]) for j in range(len(URGENCY_LABELS)))
-            report += f"| **Réel {label}** | {row_vals} |\n"
+    if dpo_val_metrics is None:
+        report += "*Non évalué (utiliser --eval-val pour générer).*\n"
     else:
-        report += "Matrice non disponible.\n"
+        cm_val = dpo_val_metrics.get("confusion_matrix")
+        if cm_val is not None:
+            report += "| | Prédit max | Prédit moderate | Prédit deferred |\n"
+            report += "|---|---|---|---|\n"
+            for i, label in enumerate(URGENCY_LABELS):
+                row_vals = " | ".join(str(cm_val[i][j]) for j in range(len(URGENCY_LABELS)))
+                report += f"| **Réel {label}** | {row_vals} |\n"
+        else:
+            report += "Matrice non disponible (aucune prédiction valide).\n"
 
     report += "\n---\n\n## 4. Matrice de confusion DPO (Test Set)\n\n"
     cm_test = dpo_test_metrics.get("confusion_matrix")
@@ -486,7 +552,7 @@ def generate_dpo_eval_report(
             row_vals = " | ".join(str(cm_test[i][j]) for j in range(len(URGENCY_LABELS)))
             report += f"| **Réel {label}** | {row_vals} |\n"
     else:
-        report += "Matrice non disponible.\n"
+        report += "Matrice non disponible (aucune prédiction valide).\n"
 
     report += "\n---\n\n## 5. Comparaisons qualitatives SFT vs DPO\n\n"
     for i, comp in enumerate(comparisons, 1):
@@ -498,18 +564,22 @@ def generate_dpo_eval_report(
             report += f"**Référence chosen** :\n{comp['chosen_reference'][:400]}\n\n"
         report += "---\n\n"
 
-    # Recommandation
-    acc_delta = dpo_val_metrics["accuracy"] - sft_val_metrics["accuracy"]
+    # Recommandation basée sur le test set (référence honnête, toujours disponible)
+    acc_dpo = dpo_test_metrics["accuracy"]
+    acc_sft = sft_test_metrics["accuracy"]
+    acc_delta = acc_dpo - acc_sft
     report += "## 6. Recommandation\n\n"
-    if acc_delta >= -0.03 and dpo_val_metrics["accuracy"] >= 0.65:
+    if sft_val_metrics is None or dpo_val_metrics is None:
+        report += "*Note : --eval-val non activé, recommandation basée sur le Test Set.*\n\n"
+    if acc_delta >= -0.03 and acc_dpo >= 0.65:
         report += (
-            f"**DPO validé** : accuracy DPO ({dpo_val_metrics['accuracy']:.1%}) "
+            f"**DPO validé** : accuracy DPO ({acc_dpo:.1%}) "
             f"sans régression significative (delta={acc_delta:+.1%}). "
             "Prêt pour l'export (22_export_model.py).\n"
         )
     elif acc_delta < -0.05:
         report += (
-            f"**Régression détectée** : accuracy DPO ({dpo_val_metrics['accuracy']:.1%}) "
+            f"**Régression détectée** : accuracy DPO ({acc_dpo:.1%}) "
             f"chute de {abs(acc_delta):.1%} vs SFT. "
             "Augmenter beta (0.1 → 0.3) pour renforcer la contrainte KL, "
             "ou réduire à 1 epoch.\n"
@@ -552,6 +622,12 @@ def main() -> None:
         help="Nombre de comparaisons qualitatives SFT vs DPO.",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=BATCH_SIZE_EVAL,
+        help=f"Exemples par batch GPU (défaut: {BATCH_SIZE_EVAL}). Réduire à 4 ou 2 si CUDA OOM.",
+    )
+    parser.add_argument(
         "--eval-val",
         action="store_true",
         default=False,
@@ -583,15 +659,21 @@ def main() -> None:
     mlflow.enable_system_metrics_logging()
     with mlflow.start_run(run_name="eval-dpo"):
         # Chargement des données
+        # urgency_level est encodé en ClassLabel (entiers). On décode en strings
+        # pour que y_true soit homogène avec les prédictions de extract_urgency_from_response.
         sft = DatasetDict(load_from_disk(str(SFT_FINAL_DIR)))  # type: ignore[arg-type]
+        urgency_feature = sft["test"].features["urgency_level"]
         df_test = pd.DataFrame(sft["test"].to_pandas())
+        df_test["urgency_level"] = df_test["urgency_level"].map(urgency_feature.int2str)
         logger.info("Test: %d exemples SFT", len(df_test))
 
-        # ── Évaluation SFT ────────────────────────────────────────────────────
-        logger.info("Chargement du modèle SFT...")
-        sft_model, sft_tokenizer = load_model(MODEL_NAME, SFT_CHECKPOINT)
+        # ── Chargement unique du modèle ───────────────────────────────────────
+        # Un seul modèle (base + SFT merged + DPO LoRA) est maintenu en VRAM.
+        # Le swap SFT ↔ DPO se fait via model.disable_adapter() sans rechargement.
+        logger.info("Chargement du modèle (base + SFT merged + DPO LoRA)...")
+        model, tokenizer = load_sft_merged_for_dpo_eval(MODEL_NAME, SFT_CHECKPOINT, DPO_CHECKPOINT)
 
-        # Évaluation val SFT (optionnelle — biaisée, désactivée par défaut)
+        # ── Évaluation SFT (adaptateur DPO désactivé) ────────────────────────
         sft_val = None
         if args.eval_val:
             logger.warning(
@@ -599,47 +681,45 @@ def main() -> None:
                 "(load_best_model_at_end=True) — métriques biaisées, ~3h30 supplémentaires par modèle."
             )
             df_val = pd.DataFrame(sft["val"].to_pandas())
-            sft_val = evaluate_split(
-                sft_model, sft_tokenizer, df_val, "sft-val", args.n_eval, logger
+            df_val["urgency_level"] = df_val["urgency_level"].map(urgency_feature.int2str)
+            with model.disable_adapter():  # type: ignore[reportAttributeAccessIssue]
+                sft_val = evaluate_split(
+                    model, tokenizer, df_val, "sft-val", args.n_eval, args.batch_size, logger
+                )
+
+        logger.info("Évaluation SFT sur test (adaptateur DPO désactivé)...")
+        with model.disable_adapter():  # type: ignore[reportAttributeAccessIssue]
+            sft_test = evaluate_split(
+                model, tokenizer, df_test, "sft-test", args.n_eval, args.batch_size, logger
             )
 
-        logger.info("Évaluation SFT sur test...")
-        sft_test = evaluate_split(
-            sft_model, sft_tokenizer, df_test, "sft-test", args.n_eval, logger
-        )
-
-        # ── Évaluation DPO ────────────────────────────────────────────────────
-        logger.info("Chargement du modèle DPO (base + SFT merged + DPO LoRA)...")
-        dpo_model, dpo_tokenizer = load_sft_merged_for_dpo_eval(
-            MODEL_NAME, SFT_CHECKPOINT, DPO_CHECKPOINT
-        )
-
-        # Évaluation val DPO (optionnelle — même biais)
+        # ── Évaluation DPO (adaptateur actif) ────────────────────────────────
         dpo_val = None
         if args.eval_val:
             df_val = pd.DataFrame(sft["val"].to_pandas())
+            df_val["urgency_level"] = df_val["urgency_level"].map(urgency_feature.int2str)
             dpo_val = evaluate_split(
-                dpo_model, dpo_tokenizer, df_val, "dpo-val", args.n_eval, logger
+                model, tokenizer, df_val, "dpo-val", args.n_eval, args.batch_size, logger
             )
 
         logger.info("Évaluation DPO sur test...")
         dpo_test = evaluate_split(
-            dpo_model, dpo_tokenizer, df_test, "dpo-test", args.n_eval, logger
+            model, tokenizer, df_test, "dpo-test", args.n_eval, args.batch_size, logger
         )
 
         # ── Comparaisons qualitatives ─────────────────────────────────────────
         logger.info("Génération de %d comparaisons qualitatives SFT vs DPO...", args.n_comparisons)
         comparisons = compare_responses_on_dpo_val(
-            sft_model, dpo_model, sft_tokenizer, DPO_FINAL_DIR, n=args.n_comparisons
+            model, tokenizer, DPO_FINAL_DIR, n=args.n_comparisons, batch_size=args.batch_size
         )
 
         # ── Rapport ───────────────────────────────────────────────────────────
-        report = generate_dpo_eval_report(
-            sft_val or sft_test, dpo_val or dpo_test, sft_test, dpo_test, comparisons
-        )
-        DPO_CHECKPOINT.mkdir(parents=True, exist_ok=True)
-        REPORT_PATH.write_text(report, encoding="utf-8")
-        logger.info("Rapport sauvegardé dans %s", REPORT_PATH)
+        report = generate_dpo_eval_report(sft_val, dpo_val, sft_test, dpo_test, comparisons)
+        run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = REPORTS_DIR / f"eval_report_{run_timestamp}.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
+        logger.info("Rapport sauvegardé dans %s", report_path)
 
         metrics_to_log = {
             "sft_test_accuracy": sft_test["accuracy"],
@@ -668,7 +748,7 @@ def main() -> None:
                 }
             )
         mlflow.log_metrics(metrics_to_log)
-        mlflow.log_artifact(str(REPORT_PATH))
+        mlflow.log_artifact(str(report_path))
 
     logger.info("=== Évaluation DPO terminée. ===")
 

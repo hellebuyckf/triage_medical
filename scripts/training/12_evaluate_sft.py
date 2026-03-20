@@ -1,6 +1,8 @@
 """Script 12 — Évaluation du modèle SFT sur val et test sets + rapport Markdown."""
 
 import argparse
+import json
+import os
 import random
 import sys
 import time
@@ -22,6 +24,7 @@ import mlflow
 import pandas as pd
 import torch
 from datasets import DatasetDict, load_from_disk
+from dotenv import load_dotenv
 from peft import PeftModel
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, fbeta_score, recall_score
 from tqdm import tqdm
@@ -31,22 +34,23 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizerFast,
 )
-from utils import extract_urgency_from_response, format_chat_prompt, get_logger
+from utils import extract_urgency_from_response, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "unsloth/Qwen3-1.7B-Base"
+MODEL_NAME = os.getenv("MODEL_NAME", "unsloth/Qwen3-1.7B")
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "sft"
 SFT_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "sft"
-REPORT_PATH = CHECKPOINT_DIR / "eval_report.md"
 
 MAX_SEQ_LENGTH = 1024
 MAX_NEW_TOKENS = 512
 DO_SAMPLE = False
 SEED = 42
 N_EXAMPLES = 10
+BATCH_SIZE_EVAL = 8  # examples per GPU batch — reduce to 4 or 2 if CUDA OOM
 
 MLFLOW_EXPERIMENT = "sft-qwen3-1.7b-triage"
 MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
@@ -55,6 +59,42 @@ URGENCY_LABELS = ["max", "moderate", "deferred"]
 
 
 # ── Fonctions ─────────────────────────────────────────────────────────────────
+
+
+def load_training_config(checkpoint_dir: Path) -> dict:
+    """Charge les hyperparamètres d'entraînement depuis le checkpoint.
+
+    Lit ``training_config.json`` (sauvegardé par script 11) et complète
+    avec les paramètres LoRA depuis ``adapter_config.json`` si disponible.
+    Retourne un dict vide avec des valeurs "—" si les fichiers sont absents.
+
+    Args:
+        checkpoint_dir: Répertoire du checkpoint SFT.
+
+    Returns:
+        Dict des hyperparamètres, valeurs "—" pour les champs manquants.
+    """
+    config: dict = {}
+
+    training_cfg = checkpoint_dir / "training_config.json"
+    if training_cfg.exists():
+        config.update(json.loads(training_cfg.read_text(encoding="utf-8")))
+
+    # Complément depuis adapter_config.json si training_config.json absent ou incomplet
+    adapter_cfg = checkpoint_dir / "adapter_config.json"
+    if adapter_cfg.exists():
+        adapter = json.loads(adapter_cfg.read_text(encoding="utf-8"))
+        config.setdefault("lora_r", adapter.get("r", "—"))
+        config.setdefault("lora_alpha", adapter.get("lora_alpha", "—"))
+        config.setdefault("lora_dropout", adapter.get("lora_dropout", "—"))
+        config.setdefault("lora_target_modules", adapter.get("target_modules", "—"))
+        config.setdefault("model_name", adapter.get("base_model_name_or_path", "—"))
+
+    defaults = ["learning_rate", "epochs", "batch_size", "grad_accum", "max_seq_length", "seed"]
+    for key in defaults:
+        config.setdefault(key, "—")
+
+    return config
 
 
 @mlflow.trace(span_type="RETRIEVER", name="load_finetuned_model")
@@ -81,6 +121,16 @@ def load_finetuned_model(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Qwen3-Base has no chat_template — inject the standard Qwen3 ChatML template
+    # so apply_chat_template works in generate_responses_batch.
+    if not tokenizer.chat_template:
+        tokenizer.chat_template = (
+            "{% for message in messages %}"
+            "{{'<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n'}}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+        )
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
@@ -94,48 +144,88 @@ def load_finetuned_model(
     return model, tokenizer  # type: ignore[reportReturnType]
 
 
-def generate_response(
+def generate_responses_batch(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizerFast,
-    instruction: str,
+    instructions: list[str],
     max_new_tokens: int = MAX_NEW_TOKENS,
-) -> str:
-    """Génère une réponse à partir d'une instruction en mode greedy.
+    batch_size: int = BATCH_SIZE_EVAL,
+) -> tuple[list[str], int]:
+    """Generate responses for a list of instructions using batched GPU inference.
 
-    Formate l'instruction en ChatML (sans le tour réponse), tokenise,
-    génère, puis décode uniquement les tokens produits jusqu'au premier
-    token <|im_end|> (EOS du tour assistant en ChatML Qwen3).
+    Sends ``batch_size`` prompts at once to ``model.generate()``, saturating the
+    GPU instead of issuing one call per example. Left-padding (set in
+    ``load_finetuned_model``) ensures all sequences in a batch are aligned to
+    the same length — a requirement for correct batch generation with causal LMs.
+
+    On CUDA OOM for a whole batch, falls back gracefully: empties the cache,
+    marks the batch outputs as empty strings, and increments the OOM counter.
+    Use a smaller ``--batch-size`` to avoid OOM on low-VRAM GPUs.
 
     Args:
-        model: Modèle fine-tuné prêt pour l'inférence.
-        tokenizer: Tokenizer associé.
-        instruction: Texte de l'instruction utilisateur.
-        max_new_tokens: Nombre max de tokens à générer.
+        model: Fine-tuned model in eval mode.
+        tokenizer: Tokenizer with ``padding_side="left"``.
+        instructions: List of user instruction strings to evaluate.
+        max_new_tokens: Maximum tokens to generate per example.
+        batch_size: Number of examples per GPU batch.
 
     Returns:
-        Texte de la réponse générée, tronqué au premier <|im_end|>.
+        Tuple of (responses, n_oom) where ``responses[i]`` is the decoded
+        text for ``instructions[i]`` and ``n_oom`` counts OOM-skipped examples.
     """
-    prompt = format_chat_prompt(instruction, response="")
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)  # type: ignore[reportCallIssue]
-    input_length = inputs["input_ids"].shape[1]  # type: ignore[reportAttributeAccessIssue]
+    im_end_id: int = tokenizer.convert_tokens_to_ids("<|im_end|>")  # type: ignore[assignment]
+    responses: list[str] = [""] * len(instructions)
+    n_oom = 0
 
-    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    for batch_start in tqdm(range(0, len(instructions), batch_size), desc="Generating"):
+        batch = instructions[batch_start : batch_start + batch_size]
 
-    with torch.no_grad():
-        output_ids = model.generate(  # type: ignore[reportCallIssue]
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=DO_SAMPLE,
-            temperature=1.0,
-            eos_token_id=im_end_id,
-        )
+        # apply_chat_template is the source of truth for special tokens
+        prompts = [
+            str(
+                tokenizer.apply_chat_template(  # type: ignore[union-attr]
+                    [{"role": "user", "content": instr}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+            for instr in batch
+        ]
 
-    generated_ids = output_ids[0][input_length:]
-    eos_positions = (generated_ids == im_end_id).nonzero(as_tuple=True)[0]
-    if len(eos_positions) > 0:
-        generated_ids = generated_ids[: eos_positions[0]]
+        # Left-padded batch — all sequences share the same input_length
+        inputs = tokenizer(  # type: ignore[call-overload]
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=MAX_SEQ_LENGTH,
+        ).to(model.device)  # type: ignore[union-attr]
+        input_length: int = inputs["input_ids"].shape[1]  # type: ignore[index]
 
-    return str(tokenizer.decode(generated_ids, skip_special_tokens=True))
+        try:
+            with torch.no_grad():
+                output_ids = model.generate(  # type: ignore[reportCallIssue]
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=DO_SAMPLE,
+                    temperature=1.0,
+                    eos_token_id=im_end_id,
+                )
+        except RuntimeError as exc:
+            if "CUDA out of memory" in str(exc):
+                n_oom += len(batch)
+                torch.cuda.empty_cache()
+                continue  # responses stay "" for this batch
+            raise
+
+        for i in range(len(batch)):
+            gen_ids = output_ids[i][input_length:]
+            eos_pos = (gen_ids == im_end_id).nonzero(as_tuple=True)[0]
+            if len(eos_pos) > 0:
+                gen_ids = gen_ids[: eos_pos[0]]
+            responses[batch_start + i] = str(tokenizer.decode(gen_ids, skip_special_tokens=True))
+
+    return responses, n_oom
 
 
 def check_format_compliance(text: str) -> bool:
@@ -163,23 +253,25 @@ def evaluate_split(
     df: pd.DataFrame,
     split_name: str,
     n_eval: int | None = None,
+    batch_size: int = BATCH_SIZE_EVAL,
     logger=None,
 ) -> dict:
-    """Évalue le modèle sur un split en générant des réponses.
+    """Evaluate the model on a split using batched GPU generation.
 
-    Pour chaque exemple, génère une réponse, extrait le niveau d'urgence
-    prédit, et compare avec la référence.
+    Collects all instructions, sends them to ``generate_responses_batch`` in
+    GPU batches, then builds the predictions list from the returned responses.
 
     Args:
-        model: Modèle fine-tuné.
-        tokenizer: Tokenizer associé.
-        df: DataFrame avec colonnes instruction, response, urgency_level.
-        split_name: Nom du split pour le logging.
-        n_eval: Nombre d'exemples à évaluer (None = tous).
-        logger: Logger optionnel.
+        model: Fine-tuned model.
+        tokenizer: Tokenizer with ``padding_side="left"``.
+        df: DataFrame with columns instruction, response, urgency_level.
+        split_name: Split name used for logging and MLflow spans.
+        n_eval: Number of examples to evaluate (None = all).
+        batch_size: Examples per GPU batch passed to ``generate_responses_batch``.
+        logger: Optional logger instance.
 
     Returns:
-        Dictionnaire avec métriques et liste des prédictions.
+        Dict with metrics and the full predictions list.
     """
     if n_eval is not None and n_eval < len(df):
         df = df.sample(n=n_eval, random_state=SEED).reset_index(drop=True)
@@ -187,27 +279,21 @@ def evaluate_split(
             logger.info("[%s] Sous-échantillon de %d exemples.", split_name, n_eval)
 
     n_total = len(df)
-    n_oom = 0
     predictions: list[dict] = []
 
     with mlflow.start_span(name=f"evaluate_split_{split_name}", span_type="CHAIN") as span:
         span.set_inputs({"split": split_name, "n_total": n_total, "n_requested": n_eval or n_total})
         t0 = time.monotonic()
 
-        for idx in tqdm(range(len(df)), desc=f"Évaluation {split_name}"):
-            row = df.iloc[idx]
-            try:
-                generated = generate_response(model, tokenizer, row["instruction"])
-            except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
-                    n_oom += 1
-                    if logger:
-                        logger.warning("OOM à l'exemple %d, skip.", idx)
-                    torch.cuda.empty_cache()
-                    generated = ""
-                else:
-                    raise
+        instructions: list[str] = list(df["instruction"])
+        generated_responses, n_oom = generate_responses_batch(
+            model, tokenizer, instructions, batch_size=batch_size
+        )
+        if n_oom > 0 and logger:
+            logger.warning("[%s] %d examples skipped due to CUDA OOM.", split_name, n_oom)
 
+        for i, (_, row) in enumerate(df.iterrows()):
+            generated = generated_responses[i]
             predicted_urgency = extract_urgency_from_response(generated)
             predictions.append(
                 {
@@ -344,31 +430,85 @@ def sample_good_bad_examples(
 
 
 def generate_eval_report(
-    val_metrics: dict,
+    val_metrics: dict | None,
     test_metrics: dict,
     good_examples: list[dict],
     bad_examples: list[dict],
+    run_timestamp: str,
+    training_config: dict,
 ) -> str:
     """Génère un rapport d'évaluation en Markdown.
 
-    Inclut les métriques, la matrice de confusion, des exemples
-    de bonnes/mauvaises prédictions, et une recommandation.
+    Inclut les hyperparamètres d'entraînement (lus depuis le checkpoint),
+    les métriques, la matrice de confusion, des exemples de bonnes/mauvaises
+    prédictions, et une recommandation.
 
     Args:
-        val_metrics: Métriques sur le val set.
-        test_metrics: Métriques sur le test set.
+        val_metrics: Métriques sur le val set, ou None si --eval-val non activé.
+        test_metrics: Métriques sur le test set (toujours disponible).
         good_examples: Exemples de prédictions correctes.
         bad_examples: Exemples de prédictions incorrectes.
+        run_timestamp: Horodatage de l'exécution (format YYYYMMDD_HHMMSS).
+        training_config: Hyperparamètres lus depuis le checkpoint.
 
     Returns:
         Rapport complet en Markdown.
     """
+
+    def _fmt(m: dict | None) -> dict:
+        """Formate un dict de métriques en strings. Retourne 'N/A' si m est None."""
+        if m is None:
+            return {
+                k: "N/A"
+                for k in [
+                    "accuracy",
+                    "f1_macro",
+                    "recall_macro",
+                    "f2_macro",
+                    "format_compliance",
+                    "response_length_mean",
+                    "n_unparseable",
+                ]
+            }
+        return {
+            "accuracy": f"{m['accuracy']:.2%}",
+            "f1_macro": f"{m['f1_macro']:.4f}",
+            "recall_macro": f"{m['recall_macro']:.4f}",
+            "f2_macro": f"{m['f2_macro']:.4f}",
+            "format_compliance": f"{m['format_compliance']:.1%}",
+            "response_length_mean": f"{m['response_length_mean']:.0f} mots",
+            "n_unparseable": f"{m['n_unparseable']}/{m['n_evaluated']}",
+        }
+
+    v = _fmt(val_metrics)
+    t = _fmt(test_metrics)
+
+    date_str = datetime.strptime(run_timestamp, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+    target_modules = training_config.get("lora_target_modules", "—")
+    if isinstance(target_modules, list):
+        target_modules = ", ".join(target_modules)
+
     report = f"""# Rapport d'Évaluation SFT
 ## project14 — Agent de Triage Médical (Qwen3-1.7B + LoRA)
 
-**Date** : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-**Modèle** : {MODEL_NAME}
+**Date** : {date_str}
+**Modèle** : {training_config.get("model_name", MODEL_NAME)}
 **Checkpoint** : {CHECKPOINT_DIR}
+
+### Hyperparamètres d'entraînement
+
+| Paramètre | Valeur |
+|---|---|
+| LoRA r | {training_config["lora_r"]} |
+| LoRA alpha | {training_config["lora_alpha"]} |
+| LoRA dropout | {training_config["lora_dropout"]} |
+| LoRA target modules | {target_modules} |
+| Learning rate | {training_config["learning_rate"]} |
+| Epochs | {training_config["epochs"]} |
+| Batch size | {training_config["batch_size"]} |
+| Gradient accumulation | {training_config["grad_accum"]} |
+| Max seq length | {training_config["max_seq_length"]} |
+| Seed | {training_config["seed"]} |
 
 ---
 
@@ -376,28 +516,31 @@ def generate_eval_report(
 
 | Métrique | Val Set | Test Set |
 |---|---|---|
-| Accuracy | {val_metrics["accuracy"]:.2%} | {test_metrics["accuracy"]:.2%} |
-| F1 Macro | {val_metrics["f1_macro"]:.4f} | {test_metrics["f1_macro"]:.4f} |
-| Recall Macro | {val_metrics["recall_macro"]:.4f} | {test_metrics["recall_macro"]:.4f} |
-| F2 Macro (β=2) | {val_metrics["f2_macro"]:.4f} | {test_metrics["f2_macro"]:.4f} |
-| Format Compliance | {val_metrics["format_compliance"]:.1%} | {test_metrics["format_compliance"]:.1%} |
-| Longueur moyenne réponse | {val_metrics["response_length_mean"]:.0f} mots | {test_metrics["response_length_mean"]:.0f} mots |
-| Non-parseables | {val_metrics["n_unparseable"]}/{val_metrics["n_evaluated"]} | {test_metrics["n_unparseable"]}/{test_metrics["n_evaluated"]} |
+| Accuracy | {v["accuracy"]} | {t["accuracy"]} |
+| F1 Macro | {v["f1_macro"]} | {t["f1_macro"]} |
+| Recall Macro | {v["recall_macro"]} | {t["recall_macro"]} |
+| F2 Macro (β=2) | {v["f2_macro"]} | {t["f2_macro"]} |
+| Format Compliance | {v["format_compliance"]} | {t["format_compliance"]} |
+| Longueur moyenne réponse | {v["response_length_mean"]} | {t["response_length_mean"]} |
+| Non-parseables | {v["n_unparseable"]} | {t["n_unparseable"]} |
 
 ---
 
 ## 2. Matrice de confusion (Val Set)
 
 """
-    cm_val = val_metrics.get("confusion_matrix")
-    if cm_val is not None:
-        report += "| | Prédit max | Prédit moderate | Prédit deferred |\n"
-        report += "|---|---|---|---|\n"
-        for i, label in enumerate(URGENCY_LABELS):
-            row_vals = " | ".join(str(cm_val[i][j]) for j in range(len(URGENCY_LABELS)))
-            report += f"| **Réel {label}** | {row_vals} |\n"
+    if val_metrics is None:
+        report += "*Non évalué (utiliser --eval-val pour générer).*\n"
     else:
-        report += "Matrice non disponible (aucune prédiction valide).\n"
+        cm_val = val_metrics.get("confusion_matrix")
+        if cm_val is not None:
+            report += "| | Prédit max | Prédit moderate | Prédit deferred |\n"
+            report += "|---|---|---|---|\n"
+            for i, label in enumerate(URGENCY_LABELS):
+                row_vals = " | ".join(str(cm_val[i][j]) for j in range(len(URGENCY_LABELS)))
+                report += f"| **Réel {label}** | {row_vals} |\n"
+        else:
+            report += "Matrice non disponible (aucune prédiction valide).\n"
 
     report += "\n---\n\n## 3. Matrice de confusion (Test Set)\n\n"
     cm_test = test_metrics.get("confusion_matrix")
@@ -422,9 +565,11 @@ def generate_eval_report(
         report += f"**Instruction** : {ex['instruction'][:300]}\n\n"
         report += f"**Réponse générée** : {ex['generated_response'][:500]}\n\n"
 
-    # Recommandation
-    acc = val_metrics["accuracy"]
+    # Recommandation basée sur le test set (référence honnête, toujours disponible)
+    acc = test_metrics["accuracy"]
     report += "---\n\n## 6. Recommandation\n\n"
+    if val_metrics is None:
+        report += "*Note : --eval-val non activé, recommandation basée sur le Test Set.*\n\n"
     if acc >= 0.70:
         report += f"**Accuracy ({acc:.1%}) >= 70%** : Modèle prêt pour la phase DPO (semaine 3).\n"
     elif acc >= 0.60:
@@ -464,6 +609,12 @@ def main() -> None:
         help="Nombre d'exemples à évaluer par split (None = tous). Utile pour le debug.",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=BATCH_SIZE_EVAL,
+        help=f"Exemples par batch GPU (défaut: {BATCH_SIZE_EVAL}). Réduire à 4 ou 2 si CUDA OOM.",
+    )
+    parser.add_argument(
         "--eval-val",
         action="store_true",
         default=False,
@@ -500,7 +651,12 @@ def main() -> None:
 
         # Chargement des données
         sft = DatasetDict(load_from_disk(str(SFT_FINAL_DIR)))  # type: ignore[arg-type]
+        # urgency_level est encodé en ClassLabel (entiers) depuis le script 04.
+        # On décode en strings pour que y_true soit homogène avec les prédictions
+        # ("max", "moderate", "deferred") retournées par extract_urgency_from_response.
+        urgency_feature = sft["test"].features["urgency_level"]
         df_test = pd.DataFrame(sft["test"].to_pandas())
+        df_test["urgency_level"] = df_test["urgency_level"].map(urgency_feature.int2str)
         logger.info("Test: %d exemples", len(df_test))
 
         # Évaluation val (optionnelle — biaisée, désactivée par défaut)
@@ -511,14 +667,27 @@ def main() -> None:
                 "(load_best_model_at_end=True) — métriques biaisées, ~3h30 supplémentaires."
             )
             df_val = pd.DataFrame(sft["val"].to_pandas())
+            df_val["urgency_level"] = df_val["urgency_level"].map(urgency_feature.int2str)
             val_metrics = evaluate_split(
-                model, tokenizer, df_val, "val", n_eval=args.n_eval, logger=logger
+                model,
+                tokenizer,
+                df_val,
+                "val",
+                n_eval=args.n_eval,
+                batch_size=args.batch_size,
+                logger=logger,
             )
 
         # Évaluation test (référence honnête)
         logger.info("Évaluation sur le test set...")
         test_metrics = evaluate_split(
-            model, tokenizer, df_test, "test", n_eval=args.n_eval, logger=logger
+            model,
+            tokenizer,
+            df_test,
+            "test",
+            n_eval=args.n_eval,
+            batch_size=args.batch_size,
+            logger=logger,
         )
 
         # Exemples (depuis test si val non disponible)
@@ -527,11 +696,21 @@ def main() -> None:
         )
         good_ex, bad_ex = sample_good_bad_examples(source_predictions)
 
-        # Rapport
-        report = generate_eval_report(val_metrics or test_metrics, test_metrics, good_ex, bad_ex)
-        REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        REPORT_PATH.write_text(report, encoding="utf-8")
-        logger.info("Rapport d'évaluation sauvegardé dans %s", REPORT_PATH)
+        # Rapport — nom horodaté pour ne pas écraser les évaluations précédentes
+        run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = PROJECT_ROOT / "reports" / "sft" / f"eval_report_{run_timestamp}.md"
+        training_config = load_training_config(CHECKPOINT_DIR)
+        report = generate_eval_report(
+            val_metrics,
+            test_metrics,
+            good_ex,
+            bad_ex,
+            run_timestamp,
+            training_config,
+        )
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
+        logger.info("Rapport d'évaluation sauvegardé dans %s", report_path)
 
         # Métriques + artefacts
         metrics_to_log = {
@@ -553,7 +732,7 @@ def main() -> None:
                 }
             )
         mlflow.log_metrics(metrics_to_log)
-        mlflow.log_artifact(str(REPORT_PATH))
+        mlflow.log_artifact(str(report_path))
 
     logger.info("=== Évaluation terminée. ===")
 

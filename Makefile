@@ -3,7 +3,7 @@
         dpo-pipeline train-dpo evaluate-dpo export-model push-model \
         push-datasets push-datasets-all \
         mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow \
-        clean clean-sft clean-dpo clean-all help
+        clean clean-sft clean-dpo clean-all retrain help
 
 # Variables
 PYTHON          = uv run python
@@ -11,6 +11,11 @@ DATA_PREP       = scripts/data_prep
 TRAINING        = scripts/training
 MLFLOW_IMAGE    = project14-mlflow
 MLFLOW_CONTAINER = project14-mlflow
+
+# Training config YAML
+# Usage : make train-sft SFT_CONFIG=configs/sft_fast.yaml
+SFT_CONFIG      ?= configs/sft.yaml
+DPO_CONFIG      ?= configs/dpo.yaml
 
 # HuggingFace Hub
 # Usage : make push-datasets HF_USERNAME=johndoe
@@ -70,7 +75,7 @@ prepare-tokenizer:
 	$(PYTHON) $(TRAINING)/10_prepare_tokenizer.py
 
 train-sft: prepare-tokenizer
-	$(PYTHON) $(TRAINING)/11_train_sft.py
+	$(PYTHON) $(TRAINING)/11_train_sft.py --config $(SFT_CONFIG)
 
 evaluate-sft: train-sft
 	$(PYTHON) $(TRAINING)/12_evaluate_sft.py $(_EVAL_VAL_FLAG)
@@ -80,7 +85,7 @@ evaluate-sft: train-sft
 dpo-pipeline: train-dpo evaluate-dpo export-model
 
 train-dpo:
-	$(PYTHON) $(TRAINING)/20_train_dpo.py
+	$(PYTHON) $(TRAINING)/20_train_dpo.py --config $(DPO_CONFIG)
 
 evaluate-dpo: train-dpo
 	$(PYTHON) $(TRAINING)/21_evaluate_dpo.py $(_EVAL_VAL_FLAG)
@@ -166,6 +171,14 @@ clean-dpo:
 clean-all:
 	rm -rf data/raw data/processed data/final checkpoints
 
+retrain:
+	@echo "=== Nettoyage des checkpoints SFT et DPO ==="
+	$(MAKE) clean-sft clean-dpo
+	@echo "=== Pipeline SFT (tokenize → train → eval) ==="
+	$(MAKE) sft-pipeline
+	@echo "=== Pipeline DPO (train → eval → export) ==="
+	$(MAKE) dpo-pipeline
+
 # ── Aide ──────────────────────────────────────────────────────────────────────
 
 help:
@@ -188,13 +201,15 @@ help:
 	@echo "  SFT"
 	@echo "  make sft-pipeline      — pipeline complet SFT (tokenize → train → eval)"
 	@echo "  make prepare-tokenizer — tokenisation + formatage ChatML"
-	@echo "  make train-sft         — entraînement SFT LoRA"
+	@echo "  make train-sft         — entraînement SFT LoRA (config: configs/sft.yaml)"
+	@echo "  make train-sft SFT_CONFIG=configs/sft_fast.yaml  — config alternative"
 	@echo "  make evaluate-sft      — évaluation sur test set (honnête)"
 	@echo "  make evaluate-sft EVAL_VAL=1  — idem + val set (biaisé, désactivé par défaut)"
 	@echo ""
 	@echo "  DPO"
 	@echo "  make dpo-pipeline      — pipeline complet DPO (train → eval → export)"
-	@echo "  make train-dpo         — alignement DPO LoRA"
+	@echo "  make train-dpo         — alignement DPO LoRA (config: configs/dpo.yaml)"
+	@echo "  make train-dpo DPO_CONFIG=configs/dpo_fast.yaml  — config alternative"
 	@echo "  make evaluate-dpo      — évaluation SFT vs DPO sur test set (honnête)"
 	@echo "  make evaluate-dpo EVAL_VAL=1  — idem + val set (biaisé, désactivé par défaut)"
 	@echo "  make export-model      — fusion LoRA SFT+DPO → checkpoints/dpo_merged/"
@@ -219,3 +234,4 @@ help:
 	@echo "  make clean-sft         — supprime checkpoints/sft et sft_tokenized/"
 	@echo "  make clean-dpo         — supprime checkpoints/dpo et dpo_merged/"
 	@echo "  make clean-all         — supprime tout data/ et checkpoints/"
+	@echo "  make retrain           — clean SFT+DPO puis relance le pipeline complet (sans data)"

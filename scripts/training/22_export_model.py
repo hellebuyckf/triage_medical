@@ -10,6 +10,7 @@ Stratégie :
 """
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -38,6 +39,7 @@ except ImportError:
     )
     sys.exit(1)
 
+from dotenv import load_dotenv
 from peft import PeftModel
 from transformers import (
     AutoModelForCausalLM,
@@ -48,10 +50,11 @@ from transformers import (
 from utils import format_dpo_prompt, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "unsloth/Qwen3-1.7B-Base"
+MODEL_NAME = os.getenv("MODEL_NAME", "unsloth/Qwen3-1.7B")
 SFT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "sft"
 DPO_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "dpo"
 EXPORT_DIR = PROJECT_ROOT / "checkpoints" / "dpo_merged"
@@ -73,13 +76,19 @@ def merge_lora_weights(
     dpo_checkpoint: Path,
     max_seq_length: int,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizerFast]:
-    """Charge le modèle de base, fusionne SFT puis DPO LoRA, et exporte via Unsloth.
+    """Charge le modèle de base sur CPU, fusionne SFT puis DPO LoRA.
+
+    La fusion est effectuée entièrement en RAM CPU (32 GB+) pour éviter
+    tout crash CUDA OOM. La VRAM (16 GB typique) est insuffisante pour
+    maintenir le modèle de base + les deux LoRA + les tenseurs intermédiaires
+    de merge_and_unload() en parallèle.
 
     Flux de fusion en deux étapes :
-    1. base → PeftModel(SFT) → merge_and_unload() → modèle SFT dense.
-    2. SFT dense → PeftModel(DPO) → merge_and_unload() → modèle DPO dense.
+    1. base (CPU) → PeftModel(SFT) → merge_and_unload() → modèle SFT dense (CPU).
+    2. SFT dense (CPU) → PeftModel(DPO) → merge_and_unload() → modèle DPO dense (CPU).
 
-    Unsloth optimise la fusion (évite les artefacts NaN, meilleure quantisation).
+    Le modèle résultant est sauvegardé sur disque ; la vérification post-export
+    recharge depuis le disque avec device_map="auto" → GPU.
 
     Args:
         model_name: Identifiant HuggingFace du modèle de base.
@@ -88,22 +97,24 @@ def merge_lora_weights(
         max_seq_length: Longueur max des séquences.
 
     Returns:
-        Tuple (modèle fusionné SFT+DPO, tokenizer).
+        Tuple (modèle fusionné SFT+DPO sur CPU, tokenizer).
     """
-    # Étape 1 : base model
+    # Étape 1 : base model sur CPU — évite tout risque d'OOM VRAM pendant la fusion
     base_model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name,
         max_seq_length=max_seq_length,
         dtype=torch.bfloat16,
         load_in_4bit=False,
+        device_map="cpu",
     )
 
-    # Étape 2 : fusionner les poids SFT
-    model = PeftModel.from_pretrained(base_model, str(sft_checkpoint))
+    # Étape 2 : fusionner les poids SFT (opération RAM)
+    model = PeftModel.from_pretrained(base_model, str(sft_checkpoint), device_map="cpu")
     model = model.merge_and_unload()  # type: ignore[reportCallIssue]
 
-    # Étape 3 : appliquer les poids DPO (sur le modèle SFT fusionné)
-    model = PeftModel.from_pretrained(model, str(dpo_checkpoint))
+    # Étape 3 : appliquer et fusionner les poids DPO (sur le modèle SFT fusionné)
+    model = PeftModel.from_pretrained(model, str(dpo_checkpoint), device_map="cpu")
+    model = model.merge_and_unload()  # type: ignore[reportCallIssue]
 
     return model, tokenizer  # type: ignore[reportReturnType]
 
@@ -115,11 +126,11 @@ def save_merged_model(
     push_to_hub: bool = False,
     repo_id: str = "",
 ) -> None:
-    """Fusionne le LoRA DPO et sauvegarde au format HuggingFace (safetensors bf16).
+    """Sauvegarde le modèle fusionné au format HuggingFace (safetensors bf16).
 
-    Le modèle reçu contient encore l'adaptateur LoRA DPO non fusionné.
-    On appelle merge_and_unload() pour fusionner les poids, puis save_pretrained()
-    pour sauvegarder au format standard HuggingFace compatible vLLM/llama.cpp.
+    Le modèle reçu est déjà un modèle dense (SFT + DPO fusionnés via
+    merge_lora_weights). On le sauvegarde directement au format standard
+    HuggingFace compatible vLLM/llama.cpp.
 
     Fichiers générés dans export_dir/ :
     - config.json, generation_config.json
@@ -127,7 +138,7 @@ def save_merged_model(
     - tokenizer.json, tokenizer_config.json, special_tokens_map.json
 
     Args:
-        model: Modèle PeftModel avec adaptateur LoRA DPO (avant fusion finale).
+        model: Modèle dense SFT+DPO fusionné (sorti de merge_lora_weights).
         tokenizer: Tokenizer Qwen3.
         export_dir: Répertoire de sortie local.
         push_to_hub: Si True, upload vers HuggingFace Hub après sauvegarde locale.
@@ -135,16 +146,12 @@ def save_merged_model(
     """
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    # Fusion finale du LoRA DPO dans les poids du modèle SFT déjà fusionné
-    merged = model.merge_and_unload()  # type: ignore[reportCallIssue]
-    merged = merged.to(torch.bfloat16)  # garantit bf16 quelle que soit la config
-
     # Sauvegarde standard HuggingFace — compatible vLLM et llama.cpp
-    merged.save_pretrained(str(export_dir), safe_serialization=True)
+    model.save_pretrained(str(export_dir), safe_serialization=True)
     tokenizer.save_pretrained(str(export_dir))
 
     if push_to_hub and repo_id:
-        merged.push_to_hub(repo_id, safe_serialization=True)
+        model.push_to_hub(repo_id, safe_serialization=True)
         tokenizer.push_to_hub(repo_id)
 
 
