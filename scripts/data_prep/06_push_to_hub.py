@@ -40,67 +40,163 @@ _PROJECT_ROOT = _SCRIPTS_DIR.parent
 load_dotenv(dotenv_path=_PROJECT_ROOT / ".env", override=False)
 
 from datasets import Dataset, DatasetDict, load_from_disk
+from huggingface_hub import DatasetCard, DatasetCardData
 from utils import get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 FINAL_DIR = PROJECT_ROOT / "data" / "final"
 
+# ── Dataset card metadata ──────────────────────────────────────────────────────
+# Each entry maps a repo-name suffix to its card metadata.
+# Tags follow the HF taxonomy: https://huggingface.co/docs/hub/datasets-cards
 
-def push_dataset_dict(
+_COMMON_TAGS = ["medical", "triage", "project14", "openclassrooms"]
+
+DATASET_METADATA: dict[str, dict] = {
+    "project14-sft": {
+        "tags": _COMMON_TAGS + ["sft", "instruction-tuning", "multilingual"],
+        "language": ["fr", "en"],
+        "description": (
+            "Supervised Fine-Tuning dataset for a medical triage agent. "
+            "~5,000 instruction/response pairs in French and English, "
+            "stratified across three urgency levels (max / moderate / deferred). "
+            "Sources: FrenchMedMCQA, MedQuAD, MediQAl. "
+            "PII anonymised with Presidio (RGPD compliant)."
+        ),
+    },
+    "project14-dpo": {
+        "tags": _COMMON_TAGS + ["dpo", "preference-learning", "rlhf"],
+        "language": ["en"],
+        "description": (
+            "Direct Preference Optimisation dataset for a medical triage agent. "
+            "~1,000 prompt/chosen/rejected pairs sourced from UltraMedical-Preference. "
+            "Human-annotated pairs prioritised during undersampling. "
+            "PII anonymised with Presidio (RGPD compliant)."
+        ),
+    },
+    "project14-sft-raw": {
+        "tags": _COMMON_TAGS + ["sft", "raw", "intermediate"],
+        "language": ["fr", "en"],
+        "description": "Intermediate SFT dataset before RGPD anonymisation (project14 pipeline).",
+    },
+    "project14-dpo-raw": {
+        "tags": _COMMON_TAGS + ["dpo", "raw", "intermediate"],
+        "language": ["en"],
+        "description": "Intermediate DPO dataset before RGPD anonymisation (project14 pipeline).",
+    },
+    "project14-sft-anonymized": {
+        "tags": _COMMON_TAGS + ["sft", "anonymized", "intermediate"],
+        "language": ["fr", "en"],
+        "description": "Anonymised SFT dataset after Presidio pass, before train/val/test split.",
+    },
+    "project14-dpo-anonymized": {
+        "tags": _COMMON_TAGS + ["dpo", "anonymized", "intermediate"],
+        "language": ["en"],
+        "description": "Anonymised DPO dataset after Presidio pass, before train/val split.",
+    },
+}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def build_dataset_card(
+    repo_id: str, tags: list[str], language: list[str], description: str
+) -> DatasetCard:
+    """Build a minimal HuggingFace DatasetCard with YAML front-matter.
+
+    The front-matter is parsed by the HF Hub search engine to populate
+    language filters, task categories, and tags on the dataset page.
+
+    Args:
+        repo_id: Full HuggingFace repository identifier (``username/repo-name``).
+        tags: List of dataset tags following HF taxonomy.
+        language: ISO 639-1 language codes (e.g. ``["fr", "en"]``).
+        description: Short description displayed on the dataset page.
+
+    Returns:
+        A :class:`huggingface_hub.DatasetCard` ready to be pushed.
+    """
+    card_data = DatasetCardData(
+        language=language,
+        license="mit",
+        tags=tags,
+        task_categories=["text-generation"],
+        pretty_name=repo_id.split("/")[-1],
+    )
+    content = f"---\n{card_data.to_yaml()}---\n\n# {repo_id.split('/')[-1]}\n\n{description}\n"
+    return DatasetCard(content)
+
+
+def push_dataset(
     path: Path,
     repo_id: str,
     private: bool,
     logger,
-) -> None:
-    """Charge un DatasetDict depuis le disque et le pousse vers HuggingFace Hub.
+) -> bool:
+    """Load a Dataset or DatasetDict from disk and push it to HuggingFace Hub.
+
+    Works for both simple datasets and dataset dicts — both expose the same
+    ``.push_to_hub()`` interface. The type is inferred automatically from the
+    Arrow files on disk.
+
+    After a successful data push, a DatasetCard (README.md with YAML front-matter)
+    is pushed so the repository is discoverable via HF search and filters.
+
+    Network errors (timeout, HTTP 5xx, connection drop) are caught so that a
+    single failing push does not abort the rest of the pipeline.
 
     Args:
-        path: Répertoire contenant le DatasetDict (dataset_dict.json).
-        repo_id: Identifiant HuggingFace du dépôt cible (username/repo-name).
-        private: Si True, le dépôt est créé en mode privé.
-        logger: Logger pour les messages.
+        path: Directory containing the HF Arrow dataset (Dataset or DatasetDict).
+        repo_id: HuggingFace repository identifier (``username/repo-name``).
+        private: If True, the repository is created in private mode.
+        logger: Logger instance.
+
+    Returns:
+        ``True`` if the dataset was pushed successfully, ``False`` otherwise.
     """
     if not path.exists():
-        logger.warning("Dataset non trouvé : %s — skip.", path)
-        return
+        logger.warning("Dataset not found: %s — skip.", path)
+        return False
 
-    logger.info("Chargement de %s...", path)
-    dataset_dict: DatasetDict = DatasetDict(load_from_disk(str(path)))  # type: ignore[arg-type]
+    logger.info("Loading %s...", path)
+    ds: Dataset | DatasetDict = load_from_disk(str(path))  # type: ignore[assignment]
 
-    splits_info = {name: len(ds) for name, ds in dataset_dict.items()}
-    logger.info("  Splits : %s", splits_info)
+    if isinstance(ds, DatasetDict):
+        logger.info("  Splits: %s", {name: len(split) for name, split in ds.items()})
+    else:
+        logger.info("  %d examples.", len(ds))
 
-    logger.info("Push vers hub : %s (private=%s)...", repo_id, private)
-    dataset_dict.push_to_hub(repo_id, private=private)
-    logger.info("  ✓ %s publié.", repo_id)
+    logger.info("Pushing to hub: %s (private=%s)...", repo_id, private)
+    try:
+        ds.push_to_hub(repo_id, private=private)
+    except Exception as exc:
+        logger.error("  ✗ Push failed for %s: %s", repo_id, exc)
+        return False
 
+    logger.info("  ✓ %s published.", repo_id)
 
-def push_single_dataset(
-    path: Path,
-    repo_id: str,
-    private: bool,
-    logger,
-) -> None:
-    """Charge un Dataset simple depuis le disque et le pousse vers HuggingFace Hub.
+    # ── Dataset card ──────────────────────────────────────────────────────────
+    repo_suffix = repo_id.split("/")[-1]
+    meta = DATASET_METADATA.get(repo_suffix)
+    if meta:
+        try:
+            card = build_dataset_card(
+                repo_id=repo_id,
+                tags=meta["tags"],
+                language=meta["language"],
+                description=meta["description"],
+            )
+            card.push_to_hub(repo_id)
+            logger.info("  ✓ Dataset card pushed for %s.", repo_id)
+        except Exception as exc:
+            # Card failure is non-blocking: data is already on the hub.
+            logger.warning("  ⚠ Dataset card push failed for %s: %s", repo_id, exc)
+    else:
+        logger.warning("  No metadata found for '%s' — card skipped.", repo_suffix)
 
-    Args:
-        path: Répertoire contenant le Dataset HF Arrow.
-        repo_id: Identifiant HuggingFace du dépôt cible (username/repo-name).
-        private: Si True, le dépôt est créé en mode privé.
-        logger: Logger pour les messages.
-    """
-    if not path.exists():
-        logger.warning("Dataset non trouvé : %s — skip.", path)
-        return
-
-    logger.info("Chargement de %s...", path)
-    ds: Dataset = Dataset.load_from_disk(str(path))
-    logger.info("  %d exemples.", len(ds))
-
-    logger.info("Push vers hub : %s (private=%s)...", repo_id, private)
-    ds.push_to_hub(repo_id, private=private)
-    logger.info("  ✓ %s publié.", repo_id)
+    return True
 
 
 def main() -> None:
@@ -166,8 +262,11 @@ def main() -> None:
         (FINAL_DIR / "dpo", f"{username}/project14-dpo"),
     ]
 
+    failed: list[str] = []
+
     for path, repo_id in final_datasets:
-        push_dataset_dict(path, repo_id, args.private, logger)
+        if not push_dataset(path, repo_id, args.private, logger):
+            failed.append(repo_id)
 
     # ── Datasets intermédiaires (Dataset simple) ──────────────────────────────
 
@@ -179,9 +278,14 @@ def main() -> None:
             (PROCESSED_DIR / "dpo_anonymized", f"{username}/project14-dpo-anonymized"),
         ]
         for path, repo_id in processed_datasets:
-            push_single_dataset(path, repo_id, args.private, logger)
+            if not push_dataset(path, repo_id, args.private, logger):
+                failed.append(repo_id)
 
-    logger.info("=== Publication terminée. ===")
+    if failed:
+        logger.error("=== %d push(es) failed: %s ===", len(failed), failed)
+        sys.exit(1)
+
+    logger.info("=== All datasets published successfully. ===")
 
 
 if __name__ == "__main__":
