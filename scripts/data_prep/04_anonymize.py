@@ -9,6 +9,13 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+# spacy.prefer_gpu() must be called before any spaCy model is loaded (i.e. before
+# NlpEngineProvider instantiation). Keeping it in its own import block prevents
+# ruff/isort from reordering it after the presidio imports.
+import spacy
+
+spacy.prefer_gpu()  # Activates GPU support for spaCy if a GPU is available
+
 import pandas as pd
 from datasets import Dataset
 from presidio_analyzer import AnalyzerEngine

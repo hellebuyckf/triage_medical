@@ -26,6 +26,7 @@ dependencies = [
     "duckdb>=1.5.0",
     "pynvml>=13.0.1",
     "python-dotenv>=1.2.2",
+    "cupy-cuda12x>=14.0.1",
 ]
 
 [project.optional-dependencies]
