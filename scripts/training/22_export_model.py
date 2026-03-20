@@ -33,15 +33,18 @@ try:
     from unsloth import FastLanguageModel
 except ImportError:
     print(
-        "Unsloth n'est pas installé. Installer avec :\n"
-        "  uv pip install unsloth",
+        "Unsloth n'est pas installé. Installer avec :\n  uv pip install unsloth",
         file=sys.stderr,
     )
     sys.exit(1)
 
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerFast
-
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerFast,
+)
 from utils import format_dpo_prompt, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -97,12 +100,12 @@ def merge_lora_weights(
 
     # Étape 2 : fusionner les poids SFT
     model = PeftModel.from_pretrained(base_model, str(sft_checkpoint))
-    model = model.merge_and_unload()
+    model = model.merge_and_unload()  # type: ignore[reportCallIssue]
 
     # Étape 3 : appliquer les poids DPO (sur le modèle SFT fusionné)
     model = PeftModel.from_pretrained(model, str(dpo_checkpoint))
 
-    return model, tokenizer
+    return model, tokenizer  # type: ignore[reportReturnType]
 
 
 def save_merged_model(
@@ -133,7 +136,7 @@ def save_merged_model(
     export_dir.mkdir(parents=True, exist_ok=True)
 
     # Fusion finale du LoRA DPO dans les poids du modèle SFT déjà fusionné
-    merged = model.merge_and_unload()
+    merged = model.merge_and_unload()  # type: ignore[reportCallIssue]
     merged = merged.to(torch.bfloat16)  # garantit bf16 quelle que soit la config
 
     # Sauvegarde standard HuggingFace — compatible vLLM et llama.cpp
@@ -306,9 +309,7 @@ def main() -> None:
         sys.exit(1)
 
     # Chargement et fusion des poids LoRA (SFT puis DPO)
-    logger.info(
-        "Chargement du modèle de base et fusion des LoRA (SFT + DPO)..."
-    )
+    logger.info("Chargement du modèle de base et fusion des LoRA (SFT + DPO)...")
     model, tokenizer = merge_lora_weights(
         MODEL_NAME, SFT_CHECKPOINT, DPO_CHECKPOINT, MAX_SEQ_LENGTH
     )

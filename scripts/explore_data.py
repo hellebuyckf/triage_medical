@@ -13,7 +13,7 @@ from pathlib import Path
 import duckdb
 import pyarrow as pa
 import pyarrow.ipc as ipc
-from datasets import load_from_disk
+from datasets import Dataset, DatasetDict, load_from_disk
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -53,8 +53,12 @@ RAW_DATASETS: dict[str, list[Path]] = {
         DATA_DIR / "raw/ultramedical_preference/train/data-00000-of-00002.arrow",
         DATA_DIR / "raw/ultramedical_preference/train/data-00001-of-00002.arrow",
     ],
-    "raw_ultramedical_val": [DATA_DIR / "raw/ultramedical_preference/validation/data-00000-of-00001.arrow"],
-    "raw_ultramedical_test": [DATA_DIR / "raw/ultramedical_preference/test/data-00000-of-00001.arrow"],
+    "raw_ultramedical_val": [
+        DATA_DIR / "raw/ultramedical_preference/validation/data-00000-of-00001.arrow"
+    ],
+    "raw_ultramedical_test": [
+        DATA_DIR / "raw/ultramedical_preference/test/data-00000-of-00001.arrow"
+    ],
 }
 
 
@@ -100,10 +104,10 @@ def build_connection() -> duckdb.DuckDBPyConnection:
         if not path.exists():
             skipped.append(prefix)
             continue
-        dataset_dict = load_from_disk(str(path))
+        dataset_dict = DatasetDict(load_from_disk(str(path)))  # type: ignore[arg-type]
         for split_name, split_ds in dataset_dict.items():
             view_name = f"{prefix}_{split_name}"
-            con.register(view_name, split_ds.to_arrow())
+            con.register(view_name, split_ds.to_arrow())  # type: ignore[reportAttributeAccessIssue]
             registered.append(view_name)
 
     # --- HuggingFace Dataset (single, processed) ---
@@ -111,7 +115,7 @@ def build_connection() -> duckdb.DuckDBPyConnection:
         if not path.exists():
             skipped.append(view_name)
             continue
-        con.register(view_name, load_from_disk(str(path)).to_arrow())
+        con.register(view_name, Dataset.load_from_disk(str(path)).to_arrow())  # type: ignore[reportAttributeAccessIssue]
         registered.append(view_name)
 
     # --- Raw Arrow IPC streams ---
@@ -156,11 +160,10 @@ def print_stats(con: duckdb.DuckDBPyConnection) -> None:
 
     for (name,) in sorted(views):
         try:
-            count = con.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+            _row = con.execute(f"SELECT COUNT(*) FROM {name}").fetchone()
+            count = _row[0] if _row is not None else 0
             columns = con.execute(f"DESCRIBE {name}").fetchall()
-            col_info = ", ".join(
-                f"{c[0]} ({c[1]})" for c in columns
-            )
+            col_info = ", ".join(f"{c[0]} ({c[1]})" for c in columns)
             print(f"\n  {name}")
             print(f"    rows    : {count:,}")
             print(f"    columns : {col_info}")
@@ -169,18 +172,16 @@ def print_stats(con: duckdb.DuckDBPyConnection) -> None:
             col_names = [c[0] for c in columns]
             if "source" in col_names:
                 dist = con.execute(
-                    f"SELECT source, COUNT(*) AS n "
-                    f"FROM {name} GROUP BY source ORDER BY n DESC"
+                    f"SELECT source, COUNT(*) AS n FROM {name} GROUP BY source ORDER BY n DESC"
                 ).fetchall()
                 dist_str = " | ".join(f"{s}: {n:,}" for s, n in dist)
                 print(f"    sources : {dist_str}")
 
             if "language" in col_names:
                 lang_dist = con.execute(
-                    f"SELECT language, COUNT(*) AS n "
-                    f"FROM {name} GROUP BY language ORDER BY n DESC"
+                    f"SELECT language, COUNT(*) AS n FROM {name} GROUP BY language ORDER BY n DESC"
                 ).fetchall()
-                lang_str = " | ".join(f"{l}: {n:,}" for l, n in lang_dist)
+                lang_str = " | ".join(f"{lang}: {n:,}" for lang, n in lang_dist)
                 print(f"    langs   : {lang_str}")
 
         except Exception as exc:  # noqa: BLE001
@@ -275,9 +276,7 @@ def interactive_shell(con: duckdb.DuckDBPyConnection) -> None:
 
 def main() -> None:
     """Parse CLI arguments and dispatch to the appropriate mode."""
-    parser = argparse.ArgumentParser(
-        description="DuckDB explorer for project14 datasets"
-    )
+    parser = argparse.ArgumentParser(description="DuckDB explorer for project14 datasets")
     parser.add_argument(
         "--stats",
         action="store_true",

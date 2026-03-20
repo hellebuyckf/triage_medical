@@ -21,12 +21,16 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import mlflow
 import pandas as pd
 import torch
-from datasets import load_from_disk
+from datasets import DatasetDict, load_from_disk
 from peft import PeftModel
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, fbeta_score, recall_score
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerFast
-
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerFast,
+)
 from utils import extract_urgency_from_response, format_chat_prompt, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -86,8 +90,8 @@ def load_finetuned_model(
     model.eval()
     # Supprime le max_length de la generation_config (Qwen3 le fixe à 32768),
     # ce qui crée un warning quand max_new_tokens est aussi passé à generate().
-    model.generation_config.max_length = None
-    return model, tokenizer
+    model.generation_config.max_length = None  # type: ignore[reportAttributeAccessIssue]
+    return model, tokenizer  # type: ignore[reportReturnType]
 
 
 def generate_response(
@@ -112,13 +116,13 @@ def generate_response(
         Texte de la réponse générée, tronqué au premier <|im_end|>.
     """
     prompt = format_chat_prompt(instruction, response="")
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    input_length = inputs["input_ids"].shape[1]
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)  # type: ignore[reportCallIssue]
+    input_length = inputs["input_ids"].shape[1]  # type: ignore[reportAttributeAccessIssue]
 
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
 
     with torch.no_grad():
-        output_ids = model.generate(
+        output_ids = model.generate(  # type: ignore[reportCallIssue]
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=DO_SAMPLE,
@@ -129,9 +133,9 @@ def generate_response(
     generated_ids = output_ids[0][input_length:]
     eos_positions = (generated_ids == im_end_id).nonzero(as_tuple=True)[0]
     if len(eos_positions) > 0:
-        generated_ids = generated_ids[:eos_positions[0]]
+        generated_ids = generated_ids[: eos_positions[0]]
 
-    return tokenizer.decode(generated_ids, skip_special_tokens=True)
+    return str(tokenizer.decode(generated_ids, skip_special_tokens=True))
 
 
 def check_format_compliance(text: str) -> bool:
@@ -205,13 +209,15 @@ def evaluate_split(
                     raise
 
             predicted_urgency = extract_urgency_from_response(generated)
-            predictions.append({
-                "instruction": row["instruction"],
-                "reference_urgency": row["urgency_level"],
-                "predicted_urgency": predicted_urgency,
-                "generated_response": generated,
-                "format_ok": check_format_compliance(generated),
-            })
+            predictions.append(
+                {
+                    "instruction": row["instruction"],
+                    "reference_urgency": row["urgency_level"],
+                    "predicted_urgency": predicted_urgency,
+                    "generated_response": generated,
+                    "format_ok": check_format_compliance(generated),
+                }
+            )
 
         duration_s = round(time.monotonic() - t0, 1)
 
@@ -220,15 +226,36 @@ def evaluate_split(
         y_pred_all = [p["predicted_urgency"] for p in predictions]
 
         n_unparseable = sum(1 for p in y_pred_all if p is None)
-        valid_pairs = [(t, p) for t, p in zip(y_true_all, y_pred_all) if p is not None]
+        valid_pairs = [
+            (t, p) for t, p in zip(y_true_all, y_pred_all, strict=False) if p is not None
+        ]
 
         if valid_pairs:
             y_true = [t for t, _ in valid_pairs]
             y_pred = [p for _, p in valid_pairs]
             accuracy = accuracy_score(y_true, y_pred)
-            f1_macro = f1_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)
-            recall_macro = recall_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)
-            f2_macro = fbeta_score(y_true, y_pred, beta=2, average="macro", labels=URGENCY_LABELS, zero_division=0)
+            f1_macro = f1_score(
+                y_true,
+                y_pred,
+                average="macro",
+                labels=URGENCY_LABELS,
+                zero_division=0,  # type: ignore[reportArgumentType]
+            )
+            recall_macro = recall_score(
+                y_true,
+                y_pred,
+                average="macro",
+                labels=URGENCY_LABELS,
+                zero_division=0,  # type: ignore[reportArgumentType]
+            )
+            f2_macro = fbeta_score(
+                y_true,
+                y_pred,
+                beta=2,
+                average="macro",
+                labels=URGENCY_LABELS,
+                zero_division=0,  # type: ignore[reportArgumentType]
+            )
             cm = confusion_matrix(y_true, y_pred, labels=URGENCY_LABELS)
         else:
             accuracy = 0.0
@@ -239,7 +266,9 @@ def evaluate_split(
 
         format_compliance = sum(1 for p in predictions if p["format_ok"]) / len(predictions)
         response_lengths = [len(p["generated_response"].split()) for p in predictions]
-        response_length_mean = sum(response_lengths) / len(response_lengths) if response_lengths else 0
+        response_length_mean = (
+            sum(response_lengths) / len(response_lengths) if response_lengths else 0
+        )
 
         metrics = {
             "accuracy": round(accuracy, 4),
@@ -257,22 +286,33 @@ def evaluate_split(
         if logger:
             logger.info(
                 "[%s] accuracy=%.2f%% | f1_macro=%.4f | recall_macro=%.4f | f2_macro=%.4f | format=%.1f%% | unparseable=%d | oom=%d | %.0fs",
-                split_name, accuracy * 100, f1_macro, recall_macro, f2_macro, format_compliance * 100,
-                n_unparseable, n_oom, duration_s,
+                split_name,
+                accuracy * 100,
+                f1_macro,
+                recall_macro,
+                f2_macro,
+                format_compliance * 100,
+                n_unparseable,
+                n_oom,
+                duration_s,
             )
 
-        span.set_outputs({
-            "accuracy": metrics["accuracy"],
-            "f1_macro": metrics["f1_macro"],
-            "recall_macro": metrics["recall_macro"],
-            "f2_macro": metrics["f2_macro"],
-            "format_compliance": metrics["format_compliance"],
-            "n_evaluated": metrics["n_evaluated"],
-            "n_unparseable": n_unparseable,
-            "n_oom": n_oom,
-            "duration_s": duration_s,
-            "throughput_examples_per_min": round(len(predictions) / duration_s * 60, 1) if duration_s > 0 else 0,
-        })
+        span.set_outputs(
+            {
+                "accuracy": metrics["accuracy"],
+                "f1_macro": metrics["f1_macro"],
+                "recall_macro": metrics["recall_macro"],
+                "f2_macro": metrics["f2_macro"],
+                "format_compliance": metrics["format_compliance"],
+                "n_evaluated": metrics["n_evaluated"],
+                "n_unparseable": n_unparseable,
+                "n_oom": n_oom,
+                "duration_s": duration_s,
+                "throughput_examples_per_min": round(len(predictions) / duration_s * 60, 1)
+                if duration_s > 0
+                else 0,
+            }
+        )
 
     return metrics
 
@@ -326,7 +366,7 @@ def generate_eval_report(
     report = f"""# Rapport d'Évaluation SFT
 ## project14 — Agent de Triage Médical (Qwen3-1.7B + LoRA)
 
-**Date** : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Date** : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 **Modèle** : {MODEL_NAME}
 **Checkpoint** : {CHECKPOINT_DIR}
 
@@ -336,13 +376,13 @@ def generate_eval_report(
 
 | Métrique | Val Set | Test Set |
 |---|---|---|
-| Accuracy | {val_metrics['accuracy']:.2%} | {test_metrics['accuracy']:.2%} |
-| F1 Macro | {val_metrics['f1_macro']:.4f} | {test_metrics['f1_macro']:.4f} |
-| Recall Macro | {val_metrics['recall_macro']:.4f} | {test_metrics['recall_macro']:.4f} |
-| F2 Macro (β=2) | {val_metrics['f2_macro']:.4f} | {test_metrics['f2_macro']:.4f} |
-| Format Compliance | {val_metrics['format_compliance']:.1%} | {test_metrics['format_compliance']:.1%} |
-| Longueur moyenne réponse | {val_metrics['response_length_mean']:.0f} mots | {test_metrics['response_length_mean']:.0f} mots |
-| Non-parseables | {val_metrics['n_unparseable']}/{val_metrics['n_evaluated']} | {test_metrics['n_unparseable']}/{test_metrics['n_evaluated']} |
+| Accuracy | {val_metrics["accuracy"]:.2%} | {test_metrics["accuracy"]:.2%} |
+| F1 Macro | {val_metrics["f1_macro"]:.4f} | {test_metrics["f1_macro"]:.4f} |
+| Recall Macro | {val_metrics["recall_macro"]:.4f} | {test_metrics["recall_macro"]:.4f} |
+| F2 Macro (β=2) | {val_metrics["f2_macro"]:.4f} | {test_metrics["f2_macro"]:.4f} |
+| Format Compliance | {val_metrics["format_compliance"]:.1%} | {test_metrics["format_compliance"]:.1%} |
+| Longueur moyenne réponse | {val_metrics["response_length_mean"]:.0f} mots | {test_metrics["response_length_mean"]:.0f} mots |
+| Non-parseables | {val_metrics["n_unparseable"]}/{val_metrics["n_evaluated"]} | {test_metrics["n_unparseable"]}/{test_metrics["n_evaluated"]} |
 
 ---
 
@@ -418,11 +458,15 @@ def main() -> None:
     )
     parser.add_argument("--verbose", action="store_true", help="Logging DEBUG")
     parser.add_argument(
-        "--n-eval", type=int, default=None,
+        "--n-eval",
+        type=int,
+        default=None,
         help="Nombre d'exemples à évaluer par split (None = tous). Utile pour le debug.",
     )
     parser.add_argument(
-        "--eval-val", action="store_true", default=False,
+        "--eval-val",
+        action="store_true",
+        default=False,
         help="Évalue aussi sur le val set (biaisé — voir note ci-dessous). Désactivé par défaut.",
     )
     args = parser.parse_args()
@@ -432,7 +476,9 @@ def main() -> None:
     # Vérification du checkpoint
     adapter_path = CHECKPOINT_DIR / "adapter_model.safetensors"
     if not adapter_path.exists():
-        logger.error("Checkpoint LoRA non trouvé : %s. Lancer 11_train_sft.py d'abord.", adapter_path)
+        logger.error(
+            "Checkpoint LoRA non trouvé : %s. Lancer 11_train_sft.py d'abord.", adapter_path
+        )
         sys.exit(1)
 
     # Vérification du dataset
@@ -453,8 +499,8 @@ def main() -> None:
         logger.info("Modèle chargé en mode inférence.")
 
         # Chargement des données
-        sft = load_from_disk(str(SFT_FINAL_DIR))
-        df_test = sft["test"].to_pandas()
+        sft = DatasetDict(load_from_disk(str(SFT_FINAL_DIR)))  # type: ignore[arg-type]
+        df_test = pd.DataFrame(sft["test"].to_pandas())
         logger.info("Test: %d exemples", len(df_test))
 
         # Évaluation val (optionnelle — biaisée, désactivée par défaut)
@@ -464,15 +510,21 @@ def main() -> None:
                 "--eval-val activé : le val set a servi à sélectionner le checkpoint "
                 "(load_best_model_at_end=True) — métriques biaisées, ~3h30 supplémentaires."
             )
-            df_val = sft["val"].to_pandas()
-            val_metrics = evaluate_split(model, tokenizer, df_val, "val", n_eval=args.n_eval, logger=logger)
+            df_val = pd.DataFrame(sft["val"].to_pandas())
+            val_metrics = evaluate_split(
+                model, tokenizer, df_val, "val", n_eval=args.n_eval, logger=logger
+            )
 
         # Évaluation test (référence honnête)
         logger.info("Évaluation sur le test set...")
-        test_metrics = evaluate_split(model, tokenizer, df_test, "test", n_eval=args.n_eval, logger=logger)
+        test_metrics = evaluate_split(
+            model, tokenizer, df_test, "test", n_eval=args.n_eval, logger=logger
+        )
 
         # Exemples (depuis test si val non disponible)
-        source_predictions = val_metrics["predictions"] if val_metrics else test_metrics["predictions"]
+        source_predictions = (
+            val_metrics["predictions"] if val_metrics else test_metrics["predictions"]
+        )
         good_ex, bad_ex = sample_good_bad_examples(source_predictions)
 
         # Rapport
@@ -490,14 +542,16 @@ def main() -> None:
             "test_format_compliance": test_metrics["format_compliance"],
         }
         if val_metrics:
-            metrics_to_log.update({
-                "val_accuracy": val_metrics["accuracy"],
-                "val_f1_macro": val_metrics["f1_macro"],
-                "val_recall_macro": val_metrics["recall_macro"],
-                "val_f2_macro": val_metrics["f2_macro"],
-                "val_format_compliance": val_metrics["format_compliance"],
-                "val_n_unparseable": val_metrics["n_unparseable"],
-            })
+            metrics_to_log.update(
+                {
+                    "val_accuracy": val_metrics["accuracy"],
+                    "val_f1_macro": val_metrics["f1_macro"],
+                    "val_recall_macro": val_metrics["recall_macro"],
+                    "val_f2_macro": val_metrics["f2_macro"],
+                    "val_format_compliance": val_metrics["format_compliance"],
+                    "val_n_unparseable": val_metrics["n_unparseable"],
+                }
+            )
         mlflow.log_metrics(metrics_to_log)
         mlflow.log_artifact(str(REPORT_PATH))
 

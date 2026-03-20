@@ -11,10 +11,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pandas as pd
-from datasets import Dataset, load_from_disk
+from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
-
-from utils import SYSTEM_PROMPT, format_chat_prompt, get_logger
+from utils import format_chat_prompt, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 
@@ -65,13 +64,15 @@ def format_to_prompt_completion(df: pd.DataFrame) -> Dataset:
     """
     records: list[dict[str, str]] = []
     for _, row in df.iterrows():
-        full_text = format_chat_prompt(row["instruction"], row["response"])
+        full_text = format_chat_prompt(str(row["instruction"]), str(row["response"]))
         idx = full_text.index(CHAT_MARKER) + len(CHAT_MARKER)
-        records.append({
-            "prompt": full_text[:idx],
-            "completion": full_text[idx:],
-            "urgency_level": row["urgency_level"],
-        })
+        records.append(
+            {
+                "prompt": full_text[:idx],
+                "completion": full_text[idx:],
+                "urgency_level": str(row["urgency_level"]),
+            }
+        )
     return Dataset.from_list(records)
 
 
@@ -95,9 +96,9 @@ def analyze_lengths(
     """
     lengths: list[int] = []
     for _, row in df.iterrows():
-        text = format_chat_prompt(row["instruction"], row["response"])
-        tokens = tokenizer(text, truncation=False)["input_ids"]
-        lengths.append(len(tokens))
+        text = format_chat_prompt(str(row["instruction"]), str(row["response"]))
+        tokens = tokenizer(text, truncation=False)["input_ids"]  # type: ignore[call-overload]
+        lengths.append(len(tokens))  # type: ignore[reportArgumentType]
 
     arr = np.array(lengths)
     stats = {
@@ -141,14 +142,18 @@ def main() -> None:
     # Chargement du tokenizer
     logger.info("Chargement du tokenizer depuis %s...", MODEL_NAME)
     tokenizer = load_tokenizer(MODEL_NAME)
-    logger.info("Tokenizer chargé. Vocab size : %d, pad_token : '%s'", tokenizer.vocab_size, tokenizer.pad_token)
+    logger.info(
+        "Tokenizer chargé. Vocab size : %d, pad_token : '%s'",
+        tokenizer.vocab_size,
+        tokenizer.pad_token,
+    )
 
     # Chargement des splits
     logger.info("Chargement des splits depuis %s...", SFT_FINAL_DIR)
-    sft = load_from_disk(str(SFT_FINAL_DIR))
-    df_train = sft["train"].to_pandas()
-    df_val = sft["val"].to_pandas()
-    df_test = sft["test"].to_pandas()
+    sft = DatasetDict(load_from_disk(str(SFT_FINAL_DIR)))  # type: ignore[arg-type]
+    df_train = pd.DataFrame(sft["train"].to_pandas())
+    df_val = pd.DataFrame(sft["val"].to_pandas())
+    df_test = pd.DataFrame(sft["test"].to_pandas())
     logger.info("  train: %d | val: %d | test: %d", len(df_train), len(df_val), len(df_test))
 
     # Analyse des longueurs sur le train set
@@ -161,7 +166,9 @@ def main() -> None:
     if stats["n_truncated"] > 0:
         logger.warning(
             "%d exemples (%.1f%%) dépassent MAX_SEQ_LENGTH=%d et seront tronqués.",
-            stats["n_truncated"], stats["pct_truncated"], MAX_SEQ_LENGTH,
+            stats["n_truncated"],
+            stats["pct_truncated"],
+            MAX_SEQ_LENGTH,
         )
     else:
         logger.info("Aucun exemple ne dépasse MAX_SEQ_LENGTH=%d.", MAX_SEQ_LENGTH)

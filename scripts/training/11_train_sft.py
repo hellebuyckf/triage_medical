@@ -30,7 +30,6 @@ import mlflow.pyfunc
 from datasets import load_from_disk
 from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import SFTConfig, SFTTrainer
-
 from utils import get_latest_checkpoint, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -195,7 +194,9 @@ def log_model_info(model: PreTrainedModel, logger) -> None:
     pct = trainable / total * 100
     logger.info(
         "Paramètres entraînables : %.2fM / %.2fB (%.2f%%)",
-        trainable / 1e6, total / 1e9, pct,
+        trainable / 1e6,
+        total / 1e9,
+        pct,
     )
 
 
@@ -226,13 +227,18 @@ def main() -> None:
 
     # Vérifier les données tokenisées
     if not (TOKENIZED_DIR / "train").exists():
-        logger.error("Datasets tokenisés non trouvés dans %s. Lancer 10_prepare_tokenizer.py d'abord.", TOKENIZED_DIR)
+        logger.error(
+            "Datasets tokenisés non trouvés dans %s. Lancer 10_prepare_tokenizer.py d'abord.",
+            TOKENIZED_DIR,
+        )
         sys.exit(1)
 
     # Resume depuis un checkpoint intermédiaire ?
     resume_path = get_latest_checkpoint(CHECKPOINT_DIR)
     if resume_path:
-        logger.info("Checkpoint intermédiaire trouvé : %s — reprise de l'entraînement.", resume_path)
+        logger.info(
+            "Checkpoint intermédiaire trouvé : %s — reprise de l'entraînement.", resume_path
+        )
 
     # Chargement des datasets
     logger.info("Chargement des datasets tokenisés...")
@@ -245,7 +251,9 @@ def main() -> None:
     val_dataset = val_dataset.map(lambda x: {"text": x["prompt"] + x["completion"]})
 
     # Chargement du modèle + LoRA
-    logger.info("Chargement du modèle %s + LoRA (r=%d, alpha=%d)...", MODEL_NAME, LORA_R, LORA_ALPHA)
+    logger.info(
+        "Chargement du modèle %s + LoRA (r=%d, alpha=%d)...", MODEL_NAME, LORA_R, LORA_ALPHA
+    )
     model, tokenizer = load_model_and_tokenizer(MODEL_NAME, MAX_SEQ_LENGTH)
     log_model_info(model, logger)
 
@@ -267,19 +275,21 @@ def main() -> None:
         logger.info("Entraînement sur séquence complète (pas de loss masking).")
 
         # Log des hyperparamètres
-        mlflow.log_params({
-            "model_name": MODEL_NAME,
-            "lora_r": LORA_R,
-            "lora_alpha": LORA_ALPHA,
-            "lora_dropout": LORA_DROPOUT,
-            "learning_rate": LEARNING_RATE,
-            "epochs": EPOCHS,
-            "batch_size": BATCH_SIZE,
-            "gradient_accumulation": GRAD_ACCUM,
-            "max_seq_length": MAX_SEQ_LENGTH,
-            "train_examples": len(train_dataset),
-            "val_examples": len(val_dataset),
-        })
+        mlflow.log_params(
+            {
+                "model_name": MODEL_NAME,
+                "lora_r": LORA_R,
+                "lora_alpha": LORA_ALPHA,
+                "lora_dropout": LORA_DROPOUT,
+                "learning_rate": LEARNING_RATE,
+                "epochs": EPOCHS,
+                "batch_size": BATCH_SIZE,
+                "gradient_accumulation": GRAD_ACCUM,
+                "max_seq_length": MAX_SEQ_LENGTH,
+                "train_examples": len(train_dataset),
+                "val_examples": len(val_dataset),
+            }
+        )
 
         # Entraînement
         logger.info("Lancement de l'entraînement...")

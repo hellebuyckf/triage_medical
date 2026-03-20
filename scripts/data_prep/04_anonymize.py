@@ -1,7 +1,6 @@
 """Script 04 — Anonymisation RGPD avec Presidio."""
 
 import argparse
-import random
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -11,12 +10,11 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pandas as pd
-from datasets import Dataset, load_from_disk
+from datasets import Dataset
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 from tqdm import tqdm
-
 from utils import filter_presidio_false_positives, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -74,7 +72,7 @@ def anonymize_text(
             "start": r.start,
             "end": r.end,
             "score": r.score,
-            "text": text[r.start:r.end],
+            "text": text[r.start : r.end],
         }
         for r in results
     ]
@@ -109,7 +107,9 @@ def anonymize_sft_dataset(
         all_entities = []
 
         # Anonymiser instruction
-        anon_instruction, entities_i = anonymize_text(row["instruction"], analyzer, anonymizer, lang)
+        anon_instruction, entities_i = anonymize_text(
+            row["instruction"], analyzer, anonymizer, lang
+        )
         df.at[df.index[idx], "instruction"] = anon_instruction
         all_entities.extend(entities_i)
 
@@ -127,22 +127,26 @@ def anonymize_sft_dataset(
                 stats["entity_type_counts"][etype] = stats["entity_type_counts"].get(etype, 0) + 1
 
                 if ent["score"] < 0.7:
-                    stats["low_confidence_examples"].append({
-                        "row_idx": idx,
-                        "entity_type": etype,
-                        "text": ent["text"],
-                        "score": ent["score"],
-                    })
+                    stats["low_confidence_examples"].append(
+                        {
+                            "row_idx": idx,
+                            "entity_type": etype,
+                            "text": ent["text"],
+                            "score": ent["score"],
+                        }
+                    )
 
             # Collecter des exemples pour le rapport
             if len(stats["examples"]) < 10:
-                stats["examples"].append({
-                    "original_instruction": row["instruction"],
-                    "anonymized_instruction": anon_instruction,
-                    "original_response": row["response"],
-                    "anonymized_response": anon_response,
-                    "entities": all_entities,
-                })
+                stats["examples"].append(
+                    {
+                        "original_instruction": row["instruction"],
+                        "anonymized_instruction": anon_instruction,
+                        "original_response": row["response"],
+                        "anonymized_response": anon_response,
+                        "entities": all_entities,
+                    }
+                )
 
     return df, stats
 
@@ -183,19 +187,23 @@ def anonymize_dpo_dataset(
                 stats["entity_type_counts"][etype] = stats["entity_type_counts"].get(etype, 0) + 1
 
                 if ent["score"] < 0.7:
-                    stats["low_confidence_examples"].append({
-                        "row_idx": idx,
-                        "entity_type": etype,
-                        "text": ent["text"],
-                        "score": ent["score"],
-                    })
+                    stats["low_confidence_examples"].append(
+                        {
+                            "row_idx": idx,
+                            "entity_type": etype,
+                            "text": ent["text"],
+                            "score": ent["score"],
+                        }
+                    )
 
             if len(stats["examples"]) < 10:
-                stats["examples"].append({
-                    "original_prompt": row["prompt"],
-                    "anonymized_prompt": df.at[df.index[idx], "prompt"],
-                    "entities": all_entities,
-                })
+                stats["examples"].append(
+                    {
+                        "original_prompt": row["prompt"],
+                        "anonymized_prompt": df.at[df.index[idx], "prompt"],
+                        "entities": all_entities,
+                    }
+                )
 
     return df, stats
 
@@ -215,7 +223,7 @@ def generate_rgpd_report(sft_stats: dict, dpo_stats: dict) -> str:
     report = f"""# Rapport d'Anonymisation RGPD
 ## project14 — Agent de Triage Médical
 
-**Date d'exécution** : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Date d'exécution** : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 ---
 
@@ -238,7 +246,7 @@ def generate_rgpd_report(sft_stats: dict, dpo_stats: dict) -> str:
         pct = (count / total_rows * 100) if total_rows > 0 else 0
         report += f"| {etype} | {count} | {pct:.1f}% |\n"
 
-    report += f"""
+    report += """
 ---
 
 ## 3. Exemples de masquages (SFT)
@@ -260,9 +268,9 @@ def generate_rgpd_report(sft_stats: dict, dpo_stats: dict) -> str:
 
 """
     for item in all_low[:20]:
-        report += f"- Ligne {item['row_idx']}: `{item['entity_type']}` = \"{item['text']}\" (score={item['score']:.2f})\n"
+        report += f'- Ligne {item["row_idx"]}: `{item["entity_type"]}` = "{item["text"]}" (score={item["score"]:.2f})\n'
 
-    report += f"""
+    report += """
 ---
 
 ## Déclaration de conformité
@@ -287,7 +295,9 @@ def main() -> None:
         return
 
     if not SFT_INPUT.exists() or not DPO_INPUT.exists():
-        logger.error("Fichiers d'entrée manquants. Lancer 02_build_sft.py et 03_build_dpo.py d'abord.")
+        logger.error(
+            "Fichiers d'entrée manquants. Lancer 02_build_sft.py et 03_build_dpo.py d'abord."
+        )
         return
 
     logger.info("Initialisation de Presidio...")
@@ -295,17 +305,21 @@ def main() -> None:
 
     # SFT
     logger.info("Anonymisation du dataset SFT...")
-    df_sft = load_from_disk(str(SFT_INPUT)).to_pandas()
+    df_sft = pd.DataFrame(Dataset.load_from_disk(str(SFT_INPUT)).to_pandas())
     df_sft_anon, sft_stats = anonymize_sft_dataset(df_sft, analyzer, anonymizer, logger)
     Dataset.from_pandas(df_sft_anon).save_to_disk(str(SFT_OUTPUT))
-    logger.info(f"SFT anonymisé: {sft_stats['rows_with_pii']} lignes avec PII, {sft_stats['total_entities_found']} entités masquées.")
+    logger.info(
+        f"SFT anonymisé: {sft_stats['rows_with_pii']} lignes avec PII, {sft_stats['total_entities_found']} entités masquées."
+    )
 
     # DPO
     logger.info("Anonymisation du dataset DPO...")
-    df_dpo = load_from_disk(str(DPO_INPUT)).to_pandas()
+    df_dpo = pd.DataFrame(Dataset.load_from_disk(str(DPO_INPUT)).to_pandas())
     df_dpo_anon, dpo_stats = anonymize_dpo_dataset(df_dpo, analyzer, anonymizer, logger)
     Dataset.from_pandas(df_dpo_anon).save_to_disk(str(DPO_OUTPUT))
-    logger.info(f"DPO anonymisé: {dpo_stats['rows_with_pii']} lignes avec PII, {dpo_stats['total_entities_found']} entités masquées.")
+    logger.info(
+        f"DPO anonymisé: {dpo_stats['rows_with_pii']} lignes avec PII, {dpo_stats['total_entities_found']} entités masquées."
+    )
 
     # Rapport RGPD
     report = generate_rgpd_report(sft_stats, dpo_stats)

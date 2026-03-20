@@ -6,7 +6,6 @@ de comparaison avant/après alignement avec exemples qualitatifs.
 
 import argparse
 import re
-import random
 import sys
 import time
 from datetime import datetime
@@ -22,16 +21,19 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 import mlflow
 import pandas as pd
-from datasets import load_from_disk
+from datasets import DatasetDict, load_from_disk
 from peft import PeftModel
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, fbeta_score, recall_score
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerFast
-
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerFast,
+)
 from utils import (
     extract_urgency_from_response,
     format_chat_prompt,
-    format_dpo_prompt,
     get_logger,
 )
 
@@ -50,7 +52,7 @@ DPO_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "dpo"
 MAX_SEQ_LENGTH = 1024
 MAX_NEW_TOKENS = 512
 DO_SAMPLE = False
-N_EXAMPLES = 5        # exemples de comparaison qualitative SFT vs DPO
+N_EXAMPLES = 5  # exemples de comparaison qualitative SFT vs DPO
 SEED = 42
 
 URGENCY_LABELS = ["max", "moderate", "deferred"]
@@ -111,8 +113,8 @@ def load_model(
     )
     model = PeftModel.from_pretrained(base, str(checkpoint_dir))
     model.eval()
-    model.generation_config.max_length = None
-    return model, tokenizer
+    model.generation_config.max_length = None  # type: ignore[reportAttributeAccessIssue]
+    return model, tokenizer  # type: ignore[reportReturnType]
 
 
 @mlflow.trace(span_type="RETRIEVER", name="load_sft_merged_for_dpo_eval")
@@ -149,13 +151,13 @@ def load_sft_merged_for_dpo_eval(
 
     # 2. Appliquer les poids SFT et les fusionner
     model = PeftModel.from_pretrained(base, str(sft_checkpoint))
-    model = model.merge_and_unload()
+    model = model.merge_and_unload()  # type: ignore[reportCallIssue]
 
     # 3. Appliquer le LoRA DPO
     model = PeftModel.from_pretrained(model, str(dpo_checkpoint))
     model.eval()
-    model.generation_config.max_length = None
-    return model, tokenizer
+    model.generation_config.max_length = None  # type: ignore[reportAttributeAccessIssue]
+    return model, tokenizer  # type: ignore[reportReturnType]
 
 
 def generate_response(
@@ -176,16 +178,16 @@ def generate_response(
         Texte de la réponse générée (sans le prompt, tronqué au premier <|im_end|>).
     """
     prompt = format_chat_prompt(instruction, response="")
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    input_length = inputs["input_ids"].shape[1]
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)  # type: ignore[reportCallIssue]
+    input_length = inputs["input_ids"].shape[1]  # type: ignore[reportAttributeAccessIssue]
 
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    stop_ids: list[int] = [im_end_id]
+    stop_ids: list[int] = [im_end_id]  # type: ignore[reportAssignmentType]
     if tokenizer.eos_token_id is not None and tokenizer.eos_token_id != im_end_id:
-        stop_ids.append(tokenizer.eos_token_id)
+        stop_ids.append(tokenizer.eos_token_id)  # type: ignore[reportArgumentType]
 
     with torch.no_grad():
-        output_ids = model.generate(
+        output_ids = model.generate(  # type: ignore[reportCallIssue]
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=DO_SAMPLE,
@@ -202,7 +204,7 @@ def generate_response(
             generated_ids = generated_ids[: positions[0]]
             break
 
-    text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+    text = str(tokenizer.decode(generated_ids, skip_special_tokens=True))
     return _strip_artifacts(text)
 
 
@@ -266,26 +268,45 @@ def evaluate_split(
                 else:
                     raise
             predicted = extract_urgency_from_response(generated)
-            predictions.append({
-                "instruction": row["instruction"],
-                "reference_urgency": row["urgency_level"],
-                "predicted_urgency": predicted,
-                "generated_response": generated,
-                "format_ok": check_format_compliance(generated),
-            })
+            predictions.append(
+                {
+                    "instruction": row["instruction"],
+                    "reference_urgency": row["urgency_level"],
+                    "predicted_urgency": predicted,
+                    "generated_response": generated,
+                    "format_ok": check_format_compliance(generated),
+                }
+            )
 
         duration_s = round(time.monotonic() - t0, 1)
 
-        valid = [(p["reference_urgency"], p["predicted_urgency"]) for p in predictions if p["predicted_urgency"]]
+        valid = [
+            (p["reference_urgency"], p["predicted_urgency"])
+            for p in predictions
+            if p["predicted_urgency"]
+        ]
         n_unparseable = len(predictions) - len(valid)
 
         if valid:
             y_true = [t for t, _ in valid]
             y_pred = [p for _, p in valid]
             accuracy = accuracy_score(y_true, y_pred)
-            f1 = f1_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)
-            recall_macro = recall_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)
-            f2_macro = fbeta_score(y_true, y_pred, beta=2, average="macro", labels=URGENCY_LABELS, zero_division=0)
+            f1 = f1_score(y_true, y_pred, average="macro", labels=URGENCY_LABELS, zero_division=0)  # type: ignore[reportArgumentType]
+            recall_macro = recall_score(
+                y_true,
+                y_pred,
+                average="macro",
+                labels=URGENCY_LABELS,
+                zero_division=0,  # type: ignore[reportArgumentType]
+            )
+            f2_macro = fbeta_score(
+                y_true,
+                y_pred,
+                beta=2,
+                average="macro",
+                labels=URGENCY_LABELS,
+                zero_division=0,  # type: ignore[reportArgumentType]
+            )
             cm = confusion_matrix(y_true, y_pred, labels=URGENCY_LABELS)
         else:
             accuracy, f1, recall_macro, f2_macro, cm = 0.0, 0.0, 0.0, 0.0, None
@@ -309,22 +330,33 @@ def evaluate_split(
         if logger:
             logger.info(
                 "[%s] accuracy=%.2f%% | f1=%.4f | recall_macro=%.4f | f2_macro=%.4f | format=%.1f%% | unparseable=%d | oom=%d | %.0fs",
-                split_name, accuracy * 100, f1, recall_macro, f2_macro, format_compliance * 100,
-                n_unparseable, n_oom, duration_s,
+                split_name,
+                accuracy * 100,
+                f1,
+                recall_macro,
+                f2_macro,
+                format_compliance * 100,
+                n_unparseable,
+                n_oom,
+                duration_s,
             )
 
-        span.set_outputs({
-            "accuracy": metrics["accuracy"],
-            "f1_macro": metrics["f1_macro"],
-            "recall_macro": metrics["recall_macro"],
-            "f2_macro": metrics["f2_macro"],
-            "format_compliance": metrics["format_compliance"],
-            "n_evaluated": metrics["n_evaluated"],
-            "n_unparseable": n_unparseable,
-            "n_oom": n_oom,
-            "duration_s": duration_s,
-            "throughput_examples_per_min": round(len(predictions) / duration_s * 60, 1) if duration_s > 0 else 0,
-        })
+        span.set_outputs(
+            {
+                "accuracy": metrics["accuracy"],
+                "f1_macro": metrics["f1_macro"],
+                "recall_macro": metrics["recall_macro"],
+                "f2_macro": metrics["f2_macro"],
+                "format_compliance": metrics["format_compliance"],
+                "n_evaluated": metrics["n_evaluated"],
+                "n_unparseable": n_unparseable,
+                "n_oom": n_oom,
+                "duration_s": duration_s,
+                "throughput_examples_per_min": round(len(predictions) / duration_s * 60, 1)
+                if duration_s > 0
+                else 0,
+            }
+        )
 
     return metrics
 
@@ -353,19 +385,21 @@ def compare_responses_on_dpo_val(
     Returns:
         Liste de dicts {prompt, sft_response, dpo_response}.
     """
-    dpo = load_from_disk(str(dpo_val_path))
-    df = dpo["val"].to_pandas().sample(n=min(n, 100), random_state=seed).head(n)
+    dpo = DatasetDict(load_from_disk(str(dpo_val_path)))  # type: ignore[arg-type]
+    df = pd.DataFrame(dpo["val"].to_pandas()).sample(n=min(n, 100), random_state=seed).head(n)
     comparisons = []
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Comparaisons SFT vs DPO"):
-        prompt = row["prompt"]
+        prompt = str(row["prompt"])
         sft_resp = generate_response(sft_model, tokenizer, prompt)
         dpo_resp = generate_response(dpo_model, tokenizer, prompt)
-        comparisons.append({
-            "prompt": prompt,
-            "sft_response": sft_resp,
-            "dpo_response": dpo_resp,
-            "chosen_reference": row.get("chosen", ""),
-        })
+        comparisons.append(
+            {
+                "prompt": prompt,
+                "sft_response": sft_resp,
+                "dpo_response": dpo_resp,
+                "chosen_reference": row.get("chosen", ""),
+            }
+        )
     return comparisons
 
 
@@ -399,7 +433,7 @@ def generate_dpo_eval_report(
     report = f"""# Rapport d'Évaluation DPO
 ## project14 — Agent de Triage Médical (Qwen3-1.7B + SFT + DPO)
 
-**Date** : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Date** : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 **Modèle de base** : {MODEL_NAME}
 **Checkpoint SFT** : {SFT_CHECKPOINT}
 **Checkpoint DPO** : {DPO_CHECKPOINT}
@@ -410,23 +444,23 @@ def generate_dpo_eval_report(
 
 | Métrique | SFT | DPO | Delta |
 |---|---|---|---|
-| Accuracy | {sft_val_metrics['accuracy']:.2%} | {dpo_val_metrics['accuracy']:.2%} | {delta(sft_val_metrics['accuracy'], dpo_val_metrics['accuracy'], pct=True)} |
-| F1 Macro | {sft_val_metrics['f1_macro']:.4f} | {dpo_val_metrics['f1_macro']:.4f} | {delta(sft_val_metrics['f1_macro'], dpo_val_metrics['f1_macro'])} |
-| Recall Macro | {sft_val_metrics['recall_macro']:.4f} | {dpo_val_metrics['recall_macro']:.4f} | {delta(sft_val_metrics['recall_macro'], dpo_val_metrics['recall_macro'])} |
-| F2 Macro (β=2) | {sft_val_metrics['f2_macro']:.4f} | {dpo_val_metrics['f2_macro']:.4f} | {delta(sft_val_metrics['f2_macro'], dpo_val_metrics['f2_macro'])} |
-| Format Compliance | {sft_val_metrics['format_compliance']:.1%} | {dpo_val_metrics['format_compliance']:.1%} | {delta(sft_val_metrics['format_compliance'], dpo_val_metrics['format_compliance'], pct=True)} |
-| Non-parseables | {sft_val_metrics['n_unparseable']}/{sft_val_metrics['n_evaluated']} | {dpo_val_metrics['n_unparseable']}/{dpo_val_metrics['n_evaluated']} | — |
-| Longueur réponse (mots) | {sft_val_metrics['response_length_mean']:.0f} | {dpo_val_metrics['response_length_mean']:.0f} | {delta(sft_val_metrics['response_length_mean'], dpo_val_metrics['response_length_mean'])} |
+| Accuracy | {sft_val_metrics["accuracy"]:.2%} | {dpo_val_metrics["accuracy"]:.2%} | {delta(sft_val_metrics["accuracy"], dpo_val_metrics["accuracy"], pct=True)} |
+| F1 Macro | {sft_val_metrics["f1_macro"]:.4f} | {dpo_val_metrics["f1_macro"]:.4f} | {delta(sft_val_metrics["f1_macro"], dpo_val_metrics["f1_macro"])} |
+| Recall Macro | {sft_val_metrics["recall_macro"]:.4f} | {dpo_val_metrics["recall_macro"]:.4f} | {delta(sft_val_metrics["recall_macro"], dpo_val_metrics["recall_macro"])} |
+| F2 Macro (β=2) | {sft_val_metrics["f2_macro"]:.4f} | {dpo_val_metrics["f2_macro"]:.4f} | {delta(sft_val_metrics["f2_macro"], dpo_val_metrics["f2_macro"])} |
+| Format Compliance | {sft_val_metrics["format_compliance"]:.1%} | {dpo_val_metrics["format_compliance"]:.1%} | {delta(sft_val_metrics["format_compliance"], dpo_val_metrics["format_compliance"], pct=True)} |
+| Non-parseables | {sft_val_metrics["n_unparseable"]}/{sft_val_metrics["n_evaluated"]} | {dpo_val_metrics["n_unparseable"]}/{dpo_val_metrics["n_evaluated"]} | — |
+| Longueur réponse (mots) | {sft_val_metrics["response_length_mean"]:.0f} | {dpo_val_metrics["response_length_mean"]:.0f} | {delta(sft_val_metrics["response_length_mean"], dpo_val_metrics["response_length_mean"])} |
 
 ## 2. Métriques comparées — Test Set
 
 | Métrique | SFT | DPO | Delta |
 |---|---|---|---|
-| Accuracy | {sft_test_metrics['accuracy']:.2%} | {dpo_test_metrics['accuracy']:.2%} | {delta(sft_test_metrics['accuracy'], dpo_test_metrics['accuracy'], pct=True)} |
-| F1 Macro | {sft_test_metrics['f1_macro']:.4f} | {dpo_test_metrics['f1_macro']:.4f} | {delta(sft_test_metrics['f1_macro'], dpo_test_metrics['f1_macro'])} |
-| Recall Macro | {sft_test_metrics['recall_macro']:.4f} | {dpo_test_metrics['recall_macro']:.4f} | {delta(sft_test_metrics['recall_macro'], dpo_test_metrics['recall_macro'])} |
-| F2 Macro (β=2) | {sft_test_metrics['f2_macro']:.4f} | {dpo_test_metrics['f2_macro']:.4f} | {delta(sft_test_metrics['f2_macro'], dpo_test_metrics['f2_macro'])} |
-| Format Compliance | {sft_test_metrics['format_compliance']:.1%} | {dpo_test_metrics['format_compliance']:.1%} | {delta(sft_test_metrics['format_compliance'], dpo_test_metrics['format_compliance'], pct=True)} |
+| Accuracy | {sft_test_metrics["accuracy"]:.2%} | {dpo_test_metrics["accuracy"]:.2%} | {delta(sft_test_metrics["accuracy"], dpo_test_metrics["accuracy"], pct=True)} |
+| F1 Macro | {sft_test_metrics["f1_macro"]:.4f} | {dpo_test_metrics["f1_macro"]:.4f} | {delta(sft_test_metrics["f1_macro"], dpo_test_metrics["f1_macro"])} |
+| Recall Macro | {sft_test_metrics["recall_macro"]:.4f} | {dpo_test_metrics["recall_macro"]:.4f} | {delta(sft_test_metrics["recall_macro"], dpo_test_metrics["recall_macro"])} |
+| F2 Macro (β=2) | {sft_test_metrics["f2_macro"]:.4f} | {dpo_test_metrics["f2_macro"]:.4f} | {delta(sft_test_metrics["f2_macro"], dpo_test_metrics["f2_macro"])} |
+| Format Compliance | {sft_test_metrics["format_compliance"]:.1%} | {dpo_test_metrics["format_compliance"]:.1%} | {delta(sft_test_metrics["format_compliance"], dpo_test_metrics["format_compliance"], pct=True)} |
 
 ---
 
@@ -506,15 +540,21 @@ def main() -> None:
     )
     parser.add_argument("--verbose", action="store_true", help="Logging DEBUG")
     parser.add_argument(
-        "--n-eval", type=int, default=None,
+        "--n-eval",
+        type=int,
+        default=None,
         help="Nombre d'exemples par split (None = tous). Utile pour le debug.",
     )
     parser.add_argument(
-        "--n-comparisons", type=int, default=N_EXAMPLES,
+        "--n-comparisons",
+        type=int,
+        default=N_EXAMPLES,
         help="Nombre de comparaisons qualitatives SFT vs DPO.",
     )
     parser.add_argument(
-        "--eval-val", action="store_true", default=False,
+        "--eval-val",
+        action="store_true",
+        default=False,
         help="Évalue aussi sur le val set (biaisé — voir note ci-dessous). Désactivé par défaut.",
     )
     args = parser.parse_args()
@@ -522,8 +562,10 @@ def main() -> None:
     logger = get_logger("21_evaluate_dpo", verbose=args.verbose)
 
     # Vérifications
-    for path in [SFT_CHECKPOINT / "adapter_model.safetensors",
-                 DPO_CHECKPOINT / "adapter_model.safetensors"]:
+    for path in [
+        SFT_CHECKPOINT / "adapter_model.safetensors",
+        DPO_CHECKPOINT / "adapter_model.safetensors",
+    ]:
         if not path.exists():
             logger.error("Checkpoint manquant : %s", path)
             sys.exit(1)
@@ -541,8 +583,8 @@ def main() -> None:
     mlflow.enable_system_metrics_logging()
     with mlflow.start_run(run_name="eval-dpo"):
         # Chargement des données
-        sft = load_from_disk(str(SFT_FINAL_DIR))
-        df_test = sft["test"].to_pandas()
+        sft = DatasetDict(load_from_disk(str(SFT_FINAL_DIR)))  # type: ignore[arg-type]
+        df_test = pd.DataFrame(sft["test"].to_pandas())
         logger.info("Test: %d exemples SFT", len(df_test))
 
         # ── Évaluation SFT ────────────────────────────────────────────────────
@@ -556,11 +598,15 @@ def main() -> None:
                 "--eval-val activé : le val set a servi à sélectionner le checkpoint "
                 "(load_best_model_at_end=True) — métriques biaisées, ~3h30 supplémentaires par modèle."
             )
-            df_val = sft["val"].to_pandas()
-            sft_val = evaluate_split(sft_model, sft_tokenizer, df_val, "sft-val", args.n_eval, logger)
+            df_val = pd.DataFrame(sft["val"].to_pandas())
+            sft_val = evaluate_split(
+                sft_model, sft_tokenizer, df_val, "sft-val", args.n_eval, logger
+            )
 
         logger.info("Évaluation SFT sur test...")
-        sft_test = evaluate_split(sft_model, sft_tokenizer, df_test, "sft-test", args.n_eval, logger)
+        sft_test = evaluate_split(
+            sft_model, sft_tokenizer, df_test, "sft-test", args.n_eval, logger
+        )
 
         # ── Évaluation DPO ────────────────────────────────────────────────────
         logger.info("Chargement du modèle DPO (base + SFT merged + DPO LoRA)...")
@@ -571,11 +617,15 @@ def main() -> None:
         # Évaluation val DPO (optionnelle — même biais)
         dpo_val = None
         if args.eval_val:
-            df_val = sft["val"].to_pandas()
-            dpo_val = evaluate_split(dpo_model, dpo_tokenizer, df_val, "dpo-val", args.n_eval, logger)
+            df_val = pd.DataFrame(sft["val"].to_pandas())
+            dpo_val = evaluate_split(
+                dpo_model, dpo_tokenizer, df_val, "dpo-val", args.n_eval, logger
+            )
 
         logger.info("Évaluation DPO sur test...")
-        dpo_test = evaluate_split(dpo_model, dpo_tokenizer, df_test, "dpo-test", args.n_eval, logger)
+        dpo_test = evaluate_split(
+            dpo_model, dpo_tokenizer, df_test, "dpo-test", args.n_eval, logger
+        )
 
         # ── Comparaisons qualitatives ─────────────────────────────────────────
         logger.info("Génération de %d comparaisons qualitatives SFT vs DPO...", args.n_comparisons)
@@ -607,14 +657,16 @@ def main() -> None:
             "f2_macro_delta": dpo_test["f2_macro"] - sft_test["f2_macro"],
         }
         if sft_val and dpo_val:
-            metrics_to_log.update({
-                "sft_val_accuracy": sft_val["accuracy"],
-                "sft_val_recall_macro": sft_val["recall_macro"],
-                "sft_val_f2_macro": sft_val["f2_macro"],
-                "dpo_val_accuracy": dpo_val["accuracy"],
-                "dpo_val_recall_macro": dpo_val["recall_macro"],
-                "dpo_val_f2_macro": dpo_val["f2_macro"],
-            })
+            metrics_to_log.update(
+                {
+                    "sft_val_accuracy": sft_val["accuracy"],
+                    "sft_val_recall_macro": sft_val["recall_macro"],
+                    "sft_val_f2_macro": sft_val["f2_macro"],
+                    "dpo_val_accuracy": dpo_val["accuracy"],
+                    "dpo_val_recall_macro": dpo_val["recall_macro"],
+                    "dpo_val_f2_macro": dpo_val["f2_macro"],
+                }
+            )
         mlflow.log_metrics(metrics_to_log)
         mlflow.log_artifact(str(REPORT_PATH))
 

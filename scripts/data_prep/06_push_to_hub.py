@@ -40,7 +40,6 @@ _PROJECT_ROOT = _SCRIPTS_DIR.parent
 load_dotenv(dotenv_path=_PROJECT_ROOT / ".env", override=False)
 
 from datasets import Dataset, DatasetDict, load_from_disk
-
 from utils import get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -67,7 +66,7 @@ def push_dataset_dict(
         return
 
     logger.info("Chargement de %s...", path)
-    dataset_dict: DatasetDict = load_from_disk(str(path))
+    dataset_dict: DatasetDict = DatasetDict(load_from_disk(str(path)))  # type: ignore[arg-type]
 
     splits_info = {name: len(ds) for name, ds in dataset_dict.items()}
     logger.info("  Splits : %s", splits_info)
@@ -96,7 +95,7 @@ def push_single_dataset(
         return
 
     logger.info("Chargement de %s...", path)
-    ds: Dataset = load_from_disk(str(path))
+    ds: Dataset = Dataset.load_from_disk(str(path))
     logger.info("  %d exemples.", len(ds))
 
     logger.info("Push vers hub : %s (private=%s)...", repo_id, private)
@@ -143,8 +142,7 @@ def main() -> None:
 
     if not args.username:
         logger.error(
-            "Username HuggingFace requis. "
-            "Utiliser --username <hf_username> ou définir HF_USERNAME."
+            "Username HuggingFace requis. Utiliser --username <hf_username> ou définir HF_USERNAME."
         )
         sys.exit(1)
 

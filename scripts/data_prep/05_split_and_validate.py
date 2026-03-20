@@ -10,10 +10,11 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import pandas as pd
-from datasets import Dataset, DatasetDict, load_from_disk
-from sklearn.model_selection import train_test_split
+from typing import cast
 
+import pandas as pd
+from datasets import Dataset, DatasetDict
+from sklearn.model_selection import train_test_split
 from utils import DPO_COLUMNS, SFT_COLUMNS, get_logger, md5_hash
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -36,13 +37,17 @@ def stratified_split_sft(
     seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Split stratifié sur urgency_level."""
-    train_df, temp_df = train_test_split(
+    _splits1 = train_test_split(
         df, test_size=(val_ratio + test_ratio), random_state=seed, stratify=df["urgency_level"]
     )
+    train_df: pd.DataFrame = cast(pd.DataFrame, _splits1[0])
+    temp_df: pd.DataFrame = cast(pd.DataFrame, _splits1[1])
     relative_test = test_ratio / (val_ratio + test_ratio)
-    val_df, test_df = train_test_split(
+    _splits2 = train_test_split(
         temp_df, test_size=relative_test, random_state=seed, stratify=temp_df["urgency_level"]
     )
+    val_df: pd.DataFrame = cast(pd.DataFrame, _splits2[0])
+    test_df: pd.DataFrame = cast(pd.DataFrame, _splits2[1])
     return (
         train_df.reset_index(drop=True),
         val_df.reset_index(drop=True),
@@ -56,7 +61,9 @@ def split_dpo(
     seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Split simple (pas de stratification pour DPO)."""
-    train_df, val_df = train_test_split(df, test_size=(1 - train_ratio), random_state=seed)
+    _splits = train_test_split(df, test_size=(1 - train_ratio), random_state=seed)
+    train_df: pd.DataFrame = cast(pd.DataFrame, _splits[0])
+    val_df: pd.DataFrame = cast(pd.DataFrame, _splits[1])
     return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
 
 
@@ -79,7 +86,9 @@ def validate_schema(df: pd.DataFrame, expected_columns: list[str], name: str, lo
     return True
 
 
-def validate_no_leakage(train_df: pd.DataFrame, test_df: pd.DataFrame, key_col: str, logger) -> bool:
+def validate_no_leakage(
+    train_df: pd.DataFrame, test_df: pd.DataFrame, key_col: str, logger
+) -> bool:
     """Vérifie qu'il n'y a pas de fuite entre train et test sur hash MD5."""
     train_hashes = set(train_df[key_col].apply(md5_hash))
     test_hashes = set(test_df[key_col].apply(md5_hash))
@@ -114,7 +123,7 @@ def generate_stats_report(splits_info: dict) -> str:
     report = f"""# Rapport de Statistiques — Datasets Finaux
 ## project14 — Agent de Triage Médical
 
-**Date de génération** : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Date de génération** : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 ---
 
@@ -143,7 +152,9 @@ def generate_stats_report(splits_info: dict) -> str:
                 report += f"**Langues** : {info['language_dist']}\n\n"
             if "avg_instruction_len" in info:
                 report += f"**Longueur moyenne instruction** : {info['avg_instruction_len']:.0f} tokens\n\n"
-                report += f"**Longueur moyenne response** : {info['avg_response_len']:.0f} tokens\n\n"
+                report += (
+                    f"**Longueur moyenne response** : {info['avg_response_len']:.0f} tokens\n\n"
+                )
 
     # DPO details
     report += "---\n\n## Distribution DPO\n\n"
@@ -155,7 +166,9 @@ def generate_stats_report(splits_info: dict) -> str:
             if "avg_prompt_len" in info:
                 report += f"**Longueur moyenne prompt** : {info['avg_prompt_len']:.0f} tokens\n\n"
                 report += f"**Longueur moyenne chosen** : {info['avg_chosen_len']:.0f} tokens\n\n"
-                report += f"**Longueur moyenne rejected** : {info['avg_rejected_len']:.0f} tokens\n\n"
+                report += (
+                    f"**Longueur moyenne rejected** : {info['avg_rejected_len']:.0f} tokens\n\n"
+                )
 
     report += "---\n\n## Validation\n\n"
     report += "Voir les logs du script `05_split_and_validate.py` pour les résultats de validation détaillés.\n"
@@ -165,7 +178,7 @@ def generate_stats_report(splits_info: dict) -> str:
 
 def compute_split_info(df: pd.DataFrame, name: str) -> dict:
     """Calcule les statistiques d'un split."""
-    info = {"count": len(df)}
+    info: dict[str, object] = {"count": len(df)}
 
     if "urgency_level" in df.columns:
         info["urgency_dist"] = df["urgency_level"].value_counts().to_dict()
@@ -210,7 +223,7 @@ def main() -> None:
 
     # ── SFT ──
     logger.info("Chargement du dataset SFT anonymisé...")
-    df_sft = load_from_disk(str(SFT_INPUT)).to_pandas()
+    df_sft = pd.DataFrame(Dataset.load_from_disk(str(SFT_INPUT)).to_pandas())
 
     if not validate_schema(df_sft, SFT_COLUMNS, "SFT", logger):
         checks_passed = False
@@ -220,15 +233,29 @@ def main() -> None:
     df_sft["_hash"] = df_sft["instruction"].apply(md5_hash)
     df_sft = df_sft.drop_duplicates(subset="_hash").drop(columns="_hash").reset_index(drop=True)
     if len(df_sft) < before_dedup:
-        logger.info(f"Déduplication post-anonymisation : {before_dedup - len(df_sft)} doublons supprimés, {len(df_sft)} restants.")
+        logger.info(
+            f"Déduplication post-anonymisation : {before_dedup - len(df_sft)} doublons supprimés, {len(df_sft)} restants."
+        )
 
     sft_train, sft_val, sft_test = stratified_split_sft(df_sft, seed=42)
 
     # Validation tailles
     checks = [
-        (len(sft_train) >= 4000, f"[✓] SFT train : {len(sft_train)} exemples (≥4000)", f"[✗] SFT train : {len(sft_train)} exemples (< 4000 !)"),
-        (len(sft_val) >= 500, f"[✓] SFT val   : {len(sft_val)} exemples (≥500)", f"[✗] SFT val   : {len(sft_val)} exemples (< 500 !)"),
-        (len(sft_test) >= 500, f"[✓] SFT test  : {len(sft_test)} exemples (≥500)", f"[✗] SFT test  : {len(sft_test)} exemples (< 500 !)"),
+        (
+            len(sft_train) >= 4000,
+            f"[✓] SFT train : {len(sft_train)} exemples (≥4000)",
+            f"[✗] SFT train : {len(sft_train)} exemples (< 4000 !)",
+        ),
+        (
+            len(sft_val) >= 500,
+            f"[✓] SFT val   : {len(sft_val)} exemples (≥500)",
+            f"[✗] SFT val   : {len(sft_val)} exemples (< 500 !)",
+        ),
+        (
+            len(sft_test) >= 500,
+            f"[✓] SFT test  : {len(sft_test)} exemples (≥500)",
+            f"[✗] SFT test  : {len(sft_test)} exemples (< 500 !)",
+        ),
     ]
 
     for ok, msg_ok, msg_fail in checks:
@@ -249,11 +276,13 @@ def main() -> None:
         checks_passed = False
 
     # Sauvegarde SFT
-    DatasetDict({
-        "train": Dataset.from_pandas(sft_train),
-        "val": Dataset.from_pandas(sft_val),
-        "test": Dataset.from_pandas(sft_test),
-    }).save_to_disk(str(FINAL_DIR / "sft"))
+    DatasetDict(
+        {
+            "train": Dataset.from_pandas(sft_train),
+            "val": Dataset.from_pandas(sft_val),
+            "test": Dataset.from_pandas(sft_test),
+        }
+    ).save_to_disk(str(FINAL_DIR / "sft"))
     logger.info(f"SFT splits sauvegardés dans {FINAL_DIR}/sft/")
 
     splits_info["sft_train"] = compute_split_info(sft_train, "sft_train")
@@ -262,7 +291,7 @@ def main() -> None:
 
     # ── DPO ──
     logger.info("Chargement du dataset DPO anonymisé...")
-    df_dpo = load_from_disk(str(DPO_INPUT)).to_pandas()
+    df_dpo = pd.DataFrame(Dataset.load_from_disk(str(DPO_INPUT)).to_pandas())
 
     if not validate_schema(df_dpo, DPO_COLUMNS, "DPO", logger):
         checks_passed = False
@@ -281,10 +310,12 @@ def main() -> None:
     logger.info("[✓] Schéma valide (toutes les colonnes requises présentes)")
 
     # Sauvegarde DPO
-    DatasetDict({
-        "train": Dataset.from_pandas(dpo_train),
-        "val": Dataset.from_pandas(dpo_val),
-    }).save_to_disk(str(FINAL_DIR / "dpo"))
+    DatasetDict(
+        {
+            "train": Dataset.from_pandas(dpo_train),
+            "val": Dataset.from_pandas(dpo_val),
+        }
+    ).save_to_disk(str(FINAL_DIR / "dpo"))
     logger.info(f"DPO splits sauvegardés dans {FINAL_DIR}/dpo/")
 
     splits_info["dpo_train"] = compute_split_info(dpo_train, "dpo_train")

@@ -9,9 +9,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import pandas as pd
-from datasets import Dataset, concatenate_datasets, load_from_disk
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_from_disk
 from tqdm import tqdm
-
 from utils import DPO_COLUMNS, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -88,7 +87,7 @@ def main() -> None:
 
     if OUTPUT_PATH.exists():
         logger.info(f"Dataset DPO déjà construit dans {OUTPUT_PATH}, skip.")
-        df = load_from_disk(str(OUTPUT_PATH)).to_pandas()
+        df = pd.DataFrame(Dataset.load_from_disk(str(OUTPUT_PATH)).to_pandas())
         logger.info(f"  {len(df)} paires.")
         return
 
@@ -97,7 +96,7 @@ def main() -> None:
         return
 
     logger.info("Chargement du dataset UltraMedical-Preference...")
-    ds = load_from_disk(str(RAW_DIR))
+    ds = DatasetDict(load_from_disk(str(RAW_DIR)))  # type: ignore[arg-type]
 
     # Utiliser le split train (le seul attendu)
     split_name = list(ds.keys())[0]
@@ -108,7 +107,9 @@ def main() -> None:
     initial_count = len(ds_split)
     ds_filtered = ds_split.filter(filter_dpo_quality, desc="Filtre qualité DPO")
     rejected_count = initial_count - len(ds_filtered)
-    logger.info(f"Filtre qualité : {rejected_count} paires rejetées, {len(ds_filtered)} conservées.")
+    logger.info(
+        f"Filtre qualité : {rejected_count} paires rejetées, {len(ds_filtered)} conservées."
+    )
 
     # Sous-échantillonnage
     ds_sampled = subsample_by_label_type(ds_filtered, target=1000, seed=42)
@@ -117,9 +118,9 @@ def main() -> None:
     # Transformation vers le schéma DPO
     rows = []
     for row in tqdm(ds_sampled, desc="Transformation DPO"):
-        rows.append(transform_ultramedical(row))
+        rows.append(transform_ultramedical(dict(row)))  # type: ignore[arg-type]
 
-    df = pd.DataFrame(rows, columns=DPO_COLUMNS)
+    df = pd.DataFrame(pd.DataFrame(rows)[DPO_COLUMNS])
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     Dataset.from_pandas(df).save_to_disk(str(OUTPUT_PATH))

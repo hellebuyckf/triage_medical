@@ -27,8 +27,7 @@ try:
     from unsloth import FastLanguageModel
 except ImportError:
     print(
-        "Unsloth n'est pas installé. Installer avec :\n"
-        "  uv pip install unsloth",
+        "Unsloth n'est pas installé. Installer avec :\n  uv pip install unsloth",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -36,11 +35,10 @@ except ImportError:
 import mlflow
 import mlflow.pyfunc
 import pandas as pd
-from datasets import Dataset, load_from_disk
+from datasets import Dataset, DatasetDict, load_from_disk
 from peft import PeftModel
 from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import DPOConfig, DPOTrainer
-
 from utils import format_dpo_prompt, format_dpo_response, get_latest_checkpoint, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -54,18 +52,23 @@ DPO_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "dpo"
 DPO_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "dpo"
 
 MAX_SEQ_LENGTH = 1024
-BETA = 0.1        # pénalité KL — force de l'alignement
+BETA = 0.1  # pénalité KL — force de l'alignement
 LEARNING_RATE = 5e-5
 EPOCHS = 2
 # DPO charge chosen + rejected en parallèle → mémoire doublée → batch_size réduit
 BATCH_SIZE = 2
-GRAD_ACCUM = 8    # effective batch = 16, identique au SFT
+GRAD_ACCUM = 8  # effective batch = 16, identique au SFT
 LORA_R = 32
 LORA_ALPHA = 64
 LORA_DROPOUT = 0.05
 LORA_TARGET_MODULES = [
-    "q_proj", "v_proj", "k_proj", "o_proj",
-    "gate_proj", "up_proj", "down_proj",
+    "q_proj",
+    "v_proj",
+    "k_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
 ]
 SEED = 42
 
@@ -132,7 +135,7 @@ def load_sft_merged_with_dpo_lora(
     model = PeftModel.from_pretrained(base_model, str(sft_checkpoint))
 
     # Étape 3 : fusionner SFT dans les poids denses
-    model = model.merge_and_unload()
+    model = model.merge_and_unload()  # type: ignore[reportCallIssue]
 
     # Étape 4 : ajouter un LoRA DPO frais et entraînable
     model = FastLanguageModel.get_peft_model(
@@ -170,17 +173,17 @@ def load_dpo_datasets(
     def _format(df: pd.DataFrame) -> Dataset:
         records = [
             {
-                "prompt": format_dpo_prompt(row["prompt"]),
-                "chosen": format_dpo_response(row["chosen"]),
-                "rejected": format_dpo_response(row["rejected"]),
+                "prompt": format_dpo_prompt(str(row["prompt"])),
+                "chosen": format_dpo_response(str(row["chosen"])),
+                "rejected": format_dpo_response(str(row["rejected"])),
             }
             for _, row in df.iterrows()
         ]
         return Dataset.from_list(records)
 
-    dpo = load_from_disk(str(dpo_dir))
-    df_train = dpo["train"].to_pandas()
-    df_val = dpo["val"].to_pandas()
+    dpo = DatasetDict(load_from_disk(str(dpo_dir)))  # type: ignore[arg-type]
+    df_train = pd.DataFrame(dpo["train"].to_pandas())
+    df_val = pd.DataFrame(dpo["val"].to_pandas())
     return _format(df_train), _format(df_val)
 
 
@@ -207,7 +210,7 @@ def build_dpo_config(output_dir: Path) -> DPOConfig:
         fp16=False,
         gradient_checkpointing=True,
         beta=BETA,
-        loss_type="sigmoid",           # DPO classique (Rafailov et al. 2023)
+        loss_type="sigmoid",  # DPO classique (Rafailov et al. 2023)  # type: ignore[reportArgumentType]
         max_length=MAX_SEQ_LENGTH,
         logging_steps=10,
         eval_strategy="steps",
@@ -235,7 +238,9 @@ def log_model_info(model: PreTrainedModel, logger) -> None:
     total = sum(p.numel() for p in model.parameters())
     logger.info(
         "Paramètres entraînables : %.2fM / %.2fB (%.3f%%)",
-        trainable / 1e6, total / 1e9, trainable / total * 100,
+        trainable / 1e6,
+        total / 1e9,
+        trainable / total * 100,
     )
 
 
@@ -262,7 +267,9 @@ def main() -> None:
 
     # Vérifications préalables
     if not (SFT_CHECKPOINT / "adapter_model.safetensors").exists():
-        logger.error("Checkpoint SFT non trouvé : %s. Lancer 11_train_sft.py d'abord.", SFT_CHECKPOINT)
+        logger.error(
+            "Checkpoint SFT non trouvé : %s. Lancer 11_train_sft.py d'abord.", SFT_CHECKPOINT
+        )
         sys.exit(1)
 
     if not DPO_FINAL_DIR.exists():
@@ -272,7 +279,9 @@ def main() -> None:
     # Resume depuis un checkpoint intermédiaire ?
     resume_path = get_latest_checkpoint(DPO_CHECKPOINT)
     if resume_path:
-        logger.info("Checkpoint intermédiaire trouvé : %s — reprise de l'entraînement.", resume_path)
+        logger.info(
+            "Checkpoint intermédiaire trouvé : %s — reprise de l'entraînement.", resume_path
+        )
 
     # Chargement et formatage des datasets
     logger.info("Chargement des datasets DPO...")
@@ -280,7 +289,11 @@ def main() -> None:
     logger.info("  train: %d paires | val: %d paires", len(train_dataset), len(val_dataset))
 
     # Chargement du modèle (base + SFT merged + DPO LoRA)
-    logger.info("Chargement du modèle : base + SFT merged + DPO LoRA (r=%d, beta=%.2f)...", LORA_R, args.beta)
+    logger.info(
+        "Chargement du modèle : base + SFT merged + DPO LoRA (r=%d, beta=%.2f)...",
+        LORA_R,
+        args.beta,
+    )
     model, tokenizer = load_sft_merged_with_dpo_lora(MODEL_NAME, SFT_CHECKPOINT, MAX_SEQ_LENGTH)
     log_model_info(model, logger)
 
@@ -311,19 +324,21 @@ def main() -> None:
         )
 
         # Log hyperparamètres
-        mlflow.log_params({
-            "model_name": MODEL_NAME,
-            "sft_checkpoint": str(SFT_CHECKPOINT),
-            "beta": args.beta,
-            "learning_rate": LEARNING_RATE,
-            "epochs": args.epochs,
-            "batch_size": BATCH_SIZE,
-            "gradient_accumulation": GRAD_ACCUM,
-            "lora_r": LORA_R,
-            "lora_alpha": LORA_ALPHA,
-            "train_pairs": len(train_dataset),
-            "val_pairs": len(val_dataset),
-        })
+        mlflow.log_params(
+            {
+                "model_name": MODEL_NAME,
+                "sft_checkpoint": str(SFT_CHECKPOINT),
+                "beta": args.beta,
+                "learning_rate": LEARNING_RATE,
+                "epochs": args.epochs,
+                "batch_size": BATCH_SIZE,
+                "gradient_accumulation": GRAD_ACCUM,
+                "lora_r": LORA_R,
+                "lora_alpha": LORA_ALPHA,
+                "train_pairs": len(train_dataset),
+                "val_pairs": len(val_dataset),
+            }
+        )
 
         # Entraînement
         logger.info("Lancement de l'entraînement DPO...")
