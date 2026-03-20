@@ -84,14 +84,31 @@ def anonymize_text(
     return anonymized.text, entities_found
 
 
-def anonymize_sft_dataset(
+def anonymize_dataset(
     df: pd.DataFrame,
+    columns: list[str],
     analyzer: AnalyzerEngine,
     anonymizer: AnonymizerEngine,
-    logger,
+    desc: str = "Anonymisation",
 ) -> tuple[pd.DataFrame, dict]:
-    """Anonymise les colonnes instruction et response du dataset SFT."""
-    stats = {
+    """Anonymize the specified text columns of a DataFrame using Presidio.
+
+    Generic function used for both SFT (instruction, response) and DPO
+    (prompt, chosen, rejected) datasets. The ``language`` column is used
+    to select the correct spaCy model per row.
+
+    Args:
+        df: Input DataFrame. Must have a ``language`` column and all columns
+            listed in ``columns``.
+        columns: Text columns to anonymize.
+        analyzer: Presidio AnalyzerEngine instance.
+        anonymizer: Presidio AnonymizerEngine instance.
+        desc: Label shown in the tqdm progress bar.
+
+    Returns:
+        Tuple of (anonymized DataFrame copy, stats dict).
+    """
+    stats: dict = {
         "total_rows": len(df),
         "rows_with_pii": 0,
         "total_entities_found": 0,
@@ -101,81 +118,16 @@ def anonymize_sft_dataset(
     }
 
     df = df.copy()
-    for idx in tqdm(range(len(df)), desc="Anonymisation SFT"):
+    for idx in tqdm(range(len(df)), desc=desc):
         row = df.iloc[idx]
         lang = row["language"]
-        all_entities = []
+        all_entities: list[dict] = []
+        anonymized_values: dict[str, str] = {}
 
-        # Anonymiser instruction
-        anon_instruction, entities_i = anonymize_text(
-            row["instruction"], analyzer, anonymizer, lang
-        )
-        df.at[df.index[idx], "instruction"] = anon_instruction
-        all_entities.extend(entities_i)
-
-        # Anonymiser response
-        anon_response, entities_r = anonymize_text(row["response"], analyzer, anonymizer, lang)
-        df.at[df.index[idx], "response"] = anon_response
-        all_entities.extend(entities_r)
-
-        if all_entities:
-            stats["rows_with_pii"] += 1
-            stats["total_entities_found"] += len(all_entities)
-
-            for ent in all_entities:
-                etype = ent["type"]
-                stats["entity_type_counts"][etype] = stats["entity_type_counts"].get(etype, 0) + 1
-
-                if ent["score"] < 0.7:
-                    stats["low_confidence_examples"].append(
-                        {
-                            "row_idx": idx,
-                            "entity_type": etype,
-                            "text": ent["text"],
-                            "score": ent["score"],
-                        }
-                    )
-
-            # Collecter des exemples pour le rapport
-            if len(stats["examples"]) < 10:
-                stats["examples"].append(
-                    {
-                        "original_instruction": row["instruction"],
-                        "anonymized_instruction": anon_instruction,
-                        "original_response": row["response"],
-                        "anonymized_response": anon_response,
-                        "entities": all_entities,
-                    }
-                )
-
-    return df, stats
-
-
-def anonymize_dpo_dataset(
-    df: pd.DataFrame,
-    analyzer: AnalyzerEngine,
-    anonymizer: AnonymizerEngine,
-    logger,
-) -> tuple[pd.DataFrame, dict]:
-    """Anonymise les colonnes prompt, chosen et rejected du dataset DPO."""
-    stats = {
-        "total_rows": len(df),
-        "rows_with_pii": 0,
-        "total_entities_found": 0,
-        "entity_type_counts": {},
-        "low_confidence_examples": [],
-        "examples": [],
-    }
-
-    df = df.copy()
-    for idx in tqdm(range(len(df)), desc="Anonymisation DPO"):
-        row = df.iloc[idx]
-        lang = row["language"]
-        all_entities = []
-
-        for col in ["prompt", "chosen", "rejected"]:
-            anon_text, entities = anonymize_text(row[col], analyzer, anonymizer, lang)
+        for col in columns:
+            anon_text, entities = anonymize_text(str(row[col]), analyzer, anonymizer, lang)
             df.at[df.index[idx], col] = anon_text
+            anonymized_values[col] = anon_text
             all_entities.extend(entities)
 
         if all_entities:
@@ -185,7 +137,6 @@ def anonymize_dpo_dataset(
             for ent in all_entities:
                 etype = ent["type"]
                 stats["entity_type_counts"][etype] = stats["entity_type_counts"].get(etype, 0) + 1
-
                 if ent["score"] < 0.7:
                     stats["low_confidence_examples"].append(
                         {
@@ -197,13 +148,11 @@ def anonymize_dpo_dataset(
                     )
 
             if len(stats["examples"]) < 10:
-                stats["examples"].append(
-                    {
-                        "original_prompt": row["prompt"],
-                        "anonymized_prompt": df.at[df.index[idx], "prompt"],
-                        "entities": all_entities,
-                    }
-                )
+                example: dict = {"entities": all_entities}
+                for col in columns:
+                    example[f"original_{col}"] = str(row[col])
+                    example[f"anonymized_{col}"] = anonymized_values[col]
+                stats["examples"].append(example)
 
     return df, stats
 
@@ -254,8 +203,8 @@ def generate_rgpd_report(sft_stats: dict, dpo_stats: dict) -> str:
 """
     for i, ex in enumerate(sft_stats["examples"][:10], 1):
         report += f"### Exemple {i}\n\n"
-        report += f"**Instruction avant** : {ex['original_instruction'][:200]}...\n\n"
-        report += f"**Instruction après** : {ex['anonymized_instruction'][:200]}...\n\n"
+        report += f"**Instruction avant** : {ex.get('original_instruction', '')[:200]}...\n\n"
+        report += f"**Instruction après** : {ex.get('anonymized_instruction', '')[:200]}...\n\n"
         report += f"**Entités détectées** : {', '.join(e['type'] + ' (' + e['text'] + ')' for e in ex['entities'][:5])}\n\n"
 
     # Avertissements
@@ -306,19 +255,25 @@ def main() -> None:
     # SFT
     logger.info("Anonymisation du dataset SFT...")
     df_sft = pd.DataFrame(Dataset.load_from_disk(str(SFT_INPUT)).to_pandas())
-    df_sft_anon, sft_stats = anonymize_sft_dataset(df_sft, analyzer, anonymizer, logger)
+    df_sft_anon, sft_stats = anonymize_dataset(
+        df_sft, ["instruction", "response"], analyzer, anonymizer, desc="Anonymisation SFT"
+    )
     Dataset.from_pandas(df_sft_anon).save_to_disk(str(SFT_OUTPUT))
     logger.info(
-        f"SFT anonymisé: {sft_stats['rows_with_pii']} lignes avec PII, {sft_stats['total_entities_found']} entités masquées."
+        f"SFT anonymisé: {sft_stats['rows_with_pii']} lignes avec PII, "
+        f"{sft_stats['total_entities_found']} entités masquées."
     )
 
     # DPO
     logger.info("Anonymisation du dataset DPO...")
     df_dpo = pd.DataFrame(Dataset.load_from_disk(str(DPO_INPUT)).to_pandas())
-    df_dpo_anon, dpo_stats = anonymize_dpo_dataset(df_dpo, analyzer, anonymizer, logger)
+    df_dpo_anon, dpo_stats = anonymize_dataset(
+        df_dpo, ["prompt", "chosen", "rejected"], analyzer, anonymizer, desc="Anonymisation DPO"
+    )
     Dataset.from_pandas(df_dpo_anon).save_to_disk(str(DPO_OUTPUT))
     logger.info(
-        f"DPO anonymisé: {dpo_stats['rows_with_pii']} lignes avec PII, {dpo_stats['total_entities_found']} entités masquées."
+        f"DPO anonymisé: {dpo_stats['rows_with_pii']} lignes avec PII, "
+        f"{dpo_stats['total_entities_found']} entités masquées."
     )
 
     # Rapport RGPD
