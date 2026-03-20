@@ -41,13 +41,8 @@ except ImportError:
 
 from dotenv import load_dotenv
 from peft import PeftModel
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    PreTrainedModel,
-    PreTrainedTokenizerFast,
-)
-from utils import format_dpo_prompt, get_logger
+from transformers import PreTrainedModel, PreTrainedTokenizerFast
+from utils import SYSTEM_PROMPT, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
@@ -151,7 +146,7 @@ def save_merged_model(
     tokenizer.save_pretrained(str(export_dir))
 
     if push_to_hub and repo_id:
-        model.push_to_hub(repo_id, safe_serialization=True)
+        model.push_to_hub(repo_id, safe_serialization=True)  # type: ignore[reportArgumentType]
         tokenizer.push_to_hub(repo_id)
 
 
@@ -160,9 +155,13 @@ def verify_export(
     test_prompt: str = VERIFY_PROMPT,
     logger=None,
 ) -> None:
-    """Charge le modèle exporté via transformers standard et génère une réponse test.
+    """Charge le modèle exporté via FastLanguageModel et génère une réponse test.
 
-    Charge depuis export_dir SANS Unsloth pour valider la compatibilité vLLM.
+    Utilise FastLanguageModel.from_pretrained car Unsloth patche les classes
+    transformers globalement à l'import (Qwen3Attention, etc.) — AutoModelForCausalLM
+    reçoit ces patches sans que apply_qkv soit initialisé, causant un AttributeError.
+    FastLanguageModel initialise correctement tous les attributs Unsloth.
+
     Log un WARNING si 'URGENCE' n'est pas présent dans la réponse générée.
 
     Args:
@@ -173,19 +172,26 @@ def verify_export(
     log = logger.info if logger else print
     warn = logger.warning if logger else print
 
-    log("Vérification de l'export (chargement sans Unsloth)...")
+    log("Vérification de l'export (chargement via FastLanguageModel)...")
 
-    # Chargement standard transformers (valide la compatibilité vLLM)
-    tokenizer = AutoTokenizer.from_pretrained(str(export_dir))
-    model = AutoModelForCausalLM.from_pretrained(
-        str(export_dir),
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
+    # FastLanguageModel est requis : Unsloth patche Qwen3Attention globalement
+    # à l'import ; AutoModelForCausalLM reçoit le forward patché mais sans apply_qkv.
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=str(export_dir),
+        max_seq_length=MAX_SEQ_LENGTH,
+        dtype=torch.bfloat16,
+        load_in_4bit=False,
     )
-    model.eval()
+    FastLanguageModel.for_inference(model)
 
-    # Formatage du prompt en ChatML
-    chatml_prompt = format_dpo_prompt(test_prompt)
+    # Formatage du prompt en ChatML via apply_chat_template
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": test_prompt},
+    ]
+    chatml_prompt: str = tokenizer.apply_chat_template(  # type: ignore[assignment]
+        messages, tokenize=False, add_generation_prompt=True
+    )
     inputs = tokenizer(chatml_prompt, return_tensors="pt").to(model.device)
 
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
@@ -289,11 +295,11 @@ def main() -> None:
             "Modèle fusionné déjà présent dans %s — push vers HF Hub sans re-fusionner.",
             EXPORT_DIR,
         )
-        tokenizer = AutoTokenizer.from_pretrained(str(EXPORT_DIR))
-        model = AutoModelForCausalLM.from_pretrained(
-            str(EXPORT_DIR),
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=str(EXPORT_DIR),
+            max_seq_length=MAX_SEQ_LENGTH,
+            dtype=torch.bfloat16,
+            load_in_4bit=False,
         )
         model.push_to_hub(args.repo_id, safe_serialization=True)
         tokenizer.push_to_hub(args.repo_id)
