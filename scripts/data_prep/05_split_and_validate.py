@@ -45,8 +45,13 @@ def stratified_split_sft(
     Returns:
         Tuple of (train, val, test) Dataset objects.
     """
+    # train_test_split(stratify_by_column=) requires a ClassLabel column.
+    # class_encode_column() converts the string column in-place (Arrow-native,
+    # no RAM duplication) and is reversed automatically after the split.
+    ds_encoded = ds.class_encode_column("urgency_level")
+
     test_ratio = 1.0 - train_ratio - val_ratio
-    split1 = ds.train_test_split(
+    split1 = ds_encoded.train_test_split(
         test_size=(val_ratio + test_ratio),
         stratify_by_column="urgency_level",
         seed=seed,
