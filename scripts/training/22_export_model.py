@@ -176,13 +176,17 @@ def verify_export(
 
     # FastLanguageModel est requis : Unsloth patche Qwen3Attention globalement
     # à l'import ; AutoModelForCausalLM reçoit le forward patché mais sans apply_qkv.
+    # for_inference() est intentionnellement omis : il active un chemin KV-cache
+    # spécialisé (fast_forward_inference) incompatible avec les shapes d'un modèle
+    # fusionné rechargé depuis le disque (shape mismatch dans les rotary embeddings).
+    # model.eval() + torch.no_grad() est suffisant pour la vérification.
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=str(export_dir),
         max_seq_length=MAX_SEQ_LENGTH,
         dtype=torch.bfloat16,
         load_in_4bit=False,
     )
-    FastLanguageModel.for_inference(model)
+    model.eval()
 
     # Formatage du prompt en ChatML via apply_chat_template
     messages = [
