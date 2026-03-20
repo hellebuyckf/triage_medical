@@ -5,6 +5,8 @@ import logging
 import re
 from pathlib import Path
 
+import yaml
+
 # ── Schémas de données ───────────────────────────────────────────────────────
 
 SFT_COLUMNS = ["instruction", "response", "source", "language", "urgency_level", "confidence"]
@@ -15,36 +17,91 @@ URGENCY_LEVELS = ["max", "moderate", "deferred"]
 
 URGENCY_MAX_KEYWORDS = [
     # FR
-    "douleur thoracique", "difficultés respiratoires", "perte de conscience",
-    "arrêt cardiaque", "hémorragie", "anaphylaxie", "AVC", "urgence vitale",
-    "danger vital", "convulsions", "coma", "détresse respiratoire",
+    "douleur thoracique",
+    "difficultés respiratoires",
+    "perte de conscience",
+    "arrêt cardiaque",
+    "hémorragie",
+    "anaphylaxie",
+    "AVC",
+    "urgence vitale",
+    "danger vital",
+    "convulsions",
+    "coma",
+    "détresse respiratoire",
     # EN
-    "chest pain", "difficulty breathing", "loss of consciousness",
-    "cardiac arrest", "hemorrhage", "anaphylaxis", "stroke",
-    "life-threatening", "emergency", "seizure", "unconscious",
+    "chest pain",
+    "difficulty breathing",
+    "loss of consciousness",
+    "cardiac arrest",
+    "hemorrhage",
+    "anaphylaxis",
+    "stroke",
+    "life-threatening",
+    "emergency",
+    "seizure",
+    "unconscious",
 ]
 
 URGENCY_DEFERRED_KEYWORDS = [
     # FR
-    "rhume", "légère douleur", "fatigue chronique", "médecin traitant",
-    "rendez-vous", "peut attendre", "suivi régulier", "vaccin",
-    "prévention", "dépistage", "bilan", "contrôle", "consultation",
-    "vitamines", "nutrition", "hygiène", "allergie saisonnière",
-    "eczéma", "acné", "insomnie", "constipation", "régime",
+    "rhume",
+    "légère douleur",
+    "fatigue chronique",
+    "médecin traitant",
+    "rendez-vous",
+    "peut attendre",
+    "suivi régulier",
+    "vaccin",
+    "prévention",
+    "dépistage",
+    "bilan",
+    "contrôle",
+    "consultation",
+    "vitamines",
+    "nutrition",
+    "hygiène",
+    "allergie saisonnière",
+    "eczéma",
+    "acné",
+    "insomnie",
+    "constipation",
+    "régime",
     # EN
-    "cold", "mild pain", "chronic fatigue", "general practitioner",
-    "appointment", "can wait", "routine", "follow-up", "vaccine",
-    "prevention", "screening", "check-up", "annual", "wellness",
-    "vitamins", "nutrition", "hygiene", "seasonal allergy",
-    "eczema", "acne", "insomnia", "constipation", "diet",
-    "supplement", "lifestyle", "rehabilitation", "physical therapy",
-    "counseling", "medication management", "refill",
+    "cold",
+    "mild pain",
+    "chronic fatigue",
+    "general practitioner",
+    "appointment",
+    "can wait",
+    "routine",
+    "follow-up",
+    "vaccine",
+    "prevention",
+    "screening",
+    "check-up",
+    "annual",
+    "wellness",
+    "vitamins",
+    "nutrition",
+    "hygiene",
+    "seasonal allergy",
+    "eczema",
+    "acne",
+    "insomnia",
+    "constipation",
+    "diet",
+    "supplement",
+    "lifestyle",
+    "rehabilitation",
+    "physical therapy",
+    "counseling",
+    "medication management",
+    "refill",
 ]
 
 # Pré-compilation des patterns pour la performance
-_MAX_PATTERN = re.compile(
-    "|".join(re.escape(kw) for kw in URGENCY_MAX_KEYWORDS), re.IGNORECASE
-)
+_MAX_PATTERN = re.compile("|".join(re.escape(kw) for kw in URGENCY_MAX_KEYWORDS), re.IGNORECASE)
 _DEFERRED_PATTERN = re.compile(
     "|".join(re.escape(kw) for kw in URGENCY_DEFERRED_KEYWORDS), re.IGNORECASE
 )
@@ -140,7 +197,7 @@ def format_triage_response(urgency_level: str, source_response: str) -> str:
 
     eval_text = source_response.strip()
     if len(eval_text) > _MAX_EVAL_CHARS:
-        eval_text = eval_text[:_MAX_EVAL_CHARS - 3] + "..."
+        eval_text = eval_text[: _MAX_EVAL_CHARS - 3] + "..."
 
     return f"{label}\n\nÉvaluation clinique : {eval_text}\n\nRecommandations : {reco}"
 
@@ -226,48 +283,180 @@ PERSON_CONFIDENCE_THRESHOLD = 0.85
 
 # Termes médicaux à ne jamais masquer même si détectés comme PERSON.
 # Inclut : éponymes (syndromes, maladies), organes mal détectés, abréviations médicales.
-MEDICAL_TERMS_ALLOWLIST: frozenset[str] = frozenset({
-    # Éponymes — maladies et syndromes (EN)
-    "alzheimer", "parkinson", "huntington", "crohn", "hodgkin", "addison",
-    "cushing", "graves", "hashimoto", "wilson", "marfan", "turner", "down",
-    "raynaud", "behcet", "sjogren", "sjögren", "brugada", "wolff",
-    "klinefelter", "noonan", "prader", "willi", "angelman", "rett",
-    "duchenne", "becker", "charcot", "marie", "tooth", "gaucher", "fabry",
-    "niemann", "pick", "pompe", "hurler", "hunter", "sanfilippo", "morquio",
-    "tay", "sachs", "canavan", "krabbe", "batten", "spielmeyer", "vogt",
-    "aicardi", "goutières", "aicardi-goutières", "lennox", "gastaut",
-    "dravet", "landau", "kleffner", "sturge", "weber", "von hippel",
-    "lindau", "neurofibromatosis", "tuberous", "sézary", "szary",
-    "paget", "bowen", "kaposi", "burkitt", "wilms", "ewing", "pott",
-    "bright", "berger", "henoch", "schönlein", "wegener", "goodpasture",
-    "buerger", "takayasu", "horton", "kawasaki", "still", "felty",
-    "reiter", "behçet", "whipple", "menetrier", "zollinger", "ellison",
-    "sipple", "wermer", "verner", "morrison", "ogilvie", "hirschsprung",
-    "meckel", "peutz", "jeghers", "lynch", "cowden", "bannayan",
-    "riley", "day", "fanconi", "blackfan", "diamond", "shwachman",
-    "kostmann", "chediak", "higashi", "wiskott", "aldrich", "bruton",
-    "digeorge", "treacher", "collins", "pierre", "robin", "goldenhar",
-    "charge", "vacter", "vacterl",
-    # Éponymes — maladies et syndromes (FR)
-    "alzheimer", "parkinson", "huntington", "crohn", "hodgkin",
-    "basedow", "quincke", "biermer", "leriche", "osler", "rendu",
-    "weber", "barre", "guillain", "millard", "gubler",
-    # Procédures / examens
-    "x-ray", "x ray", "mri", "ct scan", "ercp",
-    # Organes / termes anatomiques mal détectés
-    "lung", "heart", "kidney", "liver", "spleen", "colon",
-    # Institutions médicales
-    "nih", "cdc", "who", "nhlbi",
-    # Médicaments courants (marques taguées comme personnes)
-    "coversyl", "perindopril", "levothyrox", "doliprane", "aspirin",
-    # Termes génétiques
-    "glut", "brca", "cftr", "mthfr",
-    # Abbréviations souvent mal taguées
-    "arp", "ags",
-    # Labels d'urgence du format triage — ne jamais anonymiser
-    # Presidio/spaCy anglais détecte "URGENCE MODÉRÉE" comme entité PERSON (mot français = nom étranger)
-    "urgence", "maximale", "modérée", "différée",
-})
+MEDICAL_TERMS_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        # Éponymes — maladies et syndromes (EN)
+        "alzheimer",
+        "parkinson",
+        "huntington",
+        "crohn",
+        "hodgkin",
+        "addison",
+        "cushing",
+        "graves",
+        "hashimoto",
+        "wilson",
+        "marfan",
+        "turner",
+        "down",
+        "raynaud",
+        "behcet",
+        "sjogren",
+        "sjögren",
+        "brugada",
+        "wolff",
+        "klinefelter",
+        "noonan",
+        "prader",
+        "willi",
+        "angelman",
+        "rett",
+        "duchenne",
+        "becker",
+        "charcot",
+        "marie",
+        "tooth",
+        "gaucher",
+        "fabry",
+        "niemann",
+        "pick",
+        "pompe",
+        "hurler",
+        "hunter",
+        "sanfilippo",
+        "morquio",
+        "tay",
+        "sachs",
+        "canavan",
+        "krabbe",
+        "batten",
+        "spielmeyer",
+        "vogt",
+        "aicardi",
+        "goutières",
+        "aicardi-goutières",
+        "lennox",
+        "gastaut",
+        "dravet",
+        "landau",
+        "kleffner",
+        "sturge",
+        "weber",
+        "von hippel",
+        "lindau",
+        "neurofibromatosis",
+        "tuberous",
+        "sézary",
+        "szary",
+        "paget",
+        "bowen",
+        "kaposi",
+        "burkitt",
+        "wilms",
+        "ewing",
+        "pott",
+        "bright",
+        "berger",
+        "henoch",
+        "schönlein",
+        "wegener",
+        "goodpasture",
+        "buerger",
+        "takayasu",
+        "horton",
+        "kawasaki",
+        "still",
+        "felty",
+        "reiter",
+        "behçet",
+        "whipple",
+        "menetrier",
+        "zollinger",
+        "ellison",
+        "sipple",
+        "wermer",
+        "verner",
+        "morrison",
+        "ogilvie",
+        "hirschsprung",
+        "meckel",
+        "peutz",
+        "jeghers",
+        "lynch",
+        "cowden",
+        "bannayan",
+        "riley",
+        "day",
+        "fanconi",
+        "blackfan",
+        "diamond",
+        "shwachman",
+        "kostmann",
+        "chediak",
+        "higashi",
+        "wiskott",
+        "aldrich",
+        "bruton",
+        "digeorge",
+        "treacher",
+        "collins",
+        "pierre",
+        "robin",
+        "goldenhar",
+        "charge",
+        "vacter",
+        "vacterl",
+        # Éponymes — maladies et syndromes (FR)
+        "basedow",
+        "quincke",
+        "biermer",
+        "leriche",
+        "osler",
+        "rendu",
+        "barre",
+        "guillain",
+        "millard",
+        "gubler",
+        # Procédures / examens
+        "x-ray",
+        "x ray",
+        "mri",
+        "ct scan",
+        "ercp",
+        # Organes / termes anatomiques mal détectés
+        "lung",
+        "heart",
+        "kidney",
+        "liver",
+        "spleen",
+        "colon",
+        # Institutions médicales
+        "nih",
+        "cdc",
+        "who",
+        "nhlbi",
+        # Médicaments courants (marques taguées comme personnes)
+        "coversyl",
+        "perindopril",
+        "levothyrox",
+        "doliprane",
+        "aspirin",
+        # Termes génétiques
+        "glut",
+        "brca",
+        "cftr",
+        "mthfr",
+        # Abbréviations souvent mal taguées
+        "arp",
+        "ags",
+        # Labels d'urgence du format triage — ne jamais anonymiser
+        # Presidio/spaCy anglais détecte "URGENCE MODÉRÉE" comme entité PERSON (mot français = nom étranger)
+        "urgence",
+        "maximale",
+        "modérée",
+        "différée",
+    }
+)
 
 
 def filter_presidio_false_positives(
@@ -298,7 +487,7 @@ def filter_presidio_false_positives(
         if result.entity_type == "PERSON":
             if result.score < person_threshold:
                 continue
-            detected = text[result.start:result.end].lower().strip()
+            detected = text[result.start : result.end].lower().strip()
             if detected in allowlist:
                 continue
             # Vérifier si le terme contient un mot de l'allowlist
@@ -366,14 +555,53 @@ def get_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
     return checkpoints[-1] if checkpoints else None
 
 
+# ── Dataset config loader ─────────────────────────────────────────────────────
+
+
+def load_datasets_config(config_path: Path, project_root: Path) -> dict:
+    """Load and resolve dataset configurations from a YAML file.
+
+    Resolves ``cache_dir`` entries to absolute ``pathlib.Path`` objects
+    relative to ``project_root``.
+
+    Args:
+        config_path: Path to the YAML configuration file.
+        project_root: Root of the project, used to resolve relative ``cache_dir`` paths.
+
+    Returns:
+        Dictionary mapping dataset names to their resolved configurations.
+        Each entry has keys: ``hf_id`` (str), ``hf_config`` (str | None),
+        ``cache_dir`` (Path), ``usage`` (str).
+
+    Raises:
+        FileNotFoundError: If ``config_path`` does not exist.
+        KeyError: If the YAML file is missing the top-level ``datasets`` key.
+    """
+    with config_path.open() as f:
+        raw = yaml.safe_load(f)
+
+    return {
+        name: {
+            "hf_id": entry["hf_id"],
+            "hf_config": entry.get("hf_config"),
+            "cache_dir": project_root / entry["cache_dir"],
+            "usage": entry["usage"],
+        }
+        for name, entry in raw["datasets"].items()
+    }
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
+
 
 def get_logger(name: str, verbose: bool = False) -> logging.Logger:
     """Logger formaté avec timestamp et nom du script."""
     logger = logging.getLogger(name)
     if not logger.handlers:
         handler = logging.StreamHandler()
-        fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s — %(message)s", datefmt="%H:%M:%S")
+        fmt = logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s — %(message)s", datefmt="%H:%M:%S"
+        )
         handler.setFormatter(fmt)
         logger.addHandler(handler)
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)

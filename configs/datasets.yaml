@@ -1,0 +1,30 @@
+datasets:
+  frenchmedmcqa:
+    hf_id: "nthngdy/frenchmedmcqa"
+    hf_config: null
+    cache_dir: "data/raw"
+    usage: "sft"
+
+  medquad:
+    hf_id: "keivalya/MedQuad-MedicalQnADataset"
+    hf_config: null
+    cache_dir: "data/raw"
+    usage: "sft"
+
+  mediql_mcqu:
+    hf_id: "ANR-MALADES/MediQAl"
+    hf_config: "mcqu"
+    cache_dir: "data/raw"
+    usage: "sft"
+
+  mediql_oeq:
+    hf_id: "ANR-MALADES/MediQAl"
+    hf_config: "oeq"
+    cache_dir: "data/raw"
+    usage: "sft"
+
+  ultramedical_preference:
+    hf_id: "TsinghuaC3I/UltraMedical-Preference"
+    hf_config: null
+    cache_dir: "data/raw"
+    usage: "dpo"
