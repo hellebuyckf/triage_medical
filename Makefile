@@ -1,4 +1,4 @@
-.PHONY: all setup download build-sft build-dpo anonymize split \
+.PHONY: all setup lint download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
         dpo-pipeline train-dpo evaluate-dpo export-model push-model \
         push-datasets push-datasets-all \
@@ -31,9 +31,17 @@ _EVAL_VAL_FLAG  = $(if $(filter 1,$(EVAL_VAL)),--eval-val,)
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
 setup:
-	uv sync
+	uv sync --extra dev
 	uv pip install https://github.com/explosion/spacy-models/releases/download/fr_core_news_md-3.8.0/fr_core_news_md-3.8.0-py3-none-any.whl
 	uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl
+	uv run pre-commit install
+
+# ── Qualité du code ───────────────────────────────────────────────────────────
+
+lint:
+	uv run ruff check scripts/
+	uv run ruff format --check scripts/
+	uv run pyright scripts/
 
 # ── Data Engineering ──────────────────────────────────────────────────────────
 
@@ -165,6 +173,9 @@ help:
 	@echo ""
 	@echo "  Setup"
 	@echo "  make setup             — installe les dépendances et modèles spaCy"
+	@echo ""
+	@echo "  Qualité du code"
+	@echo "  make lint              — ruff (linter + format) + pyright (typage)"
 	@echo ""
 	@echo "  Data Engineering"
 	@echo "  make data-pipeline     — pipeline complet data (download → split)"

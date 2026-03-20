@@ -1,0 +1,8 @@
+{
+  "pythonVersion": "3.11",
+  "include": ["scripts"],
+  "typeCheckingMode": "standard",
+  "reportMissingImports": false,
+  "reportMissingModuleSource": false,
+  "reportPrivateImportUsage": false
+}

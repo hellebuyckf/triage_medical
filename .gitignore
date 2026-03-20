@@ -170,8 +170,7 @@ poetry.toml
 # ruff
 .ruff_cache/
 
-# LSP config files
-pyrightconfig.json
+# LSP config files — pyrightconfig.json is tracked (shared project type config)
 
 # End of https://www.toptal.com/developers/gitignore/api/python
 data/final/
