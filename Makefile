@@ -91,7 +91,7 @@ evaluate-dpo: train-dpo
 	$(PYTHON) $(TRAINING)/21_evaluate_dpo.py $(_EVAL_VAL_FLAG)
 
 export-model: evaluate-dpo
-	$(PYTHON) $(TRAINING)/22_export_model.py
+	$(PYTHON) $(TRAINING)/22_export_model.py --skip-verify
 
 push-model: export-model
 	@if [ -z "$(HF_USERNAME)" ]; then \

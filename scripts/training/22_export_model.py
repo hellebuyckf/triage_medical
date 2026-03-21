@@ -270,7 +270,13 @@ def main() -> None:
     parser.add_argument(
         "--skip-verify",
         action="store_true",
-        help="Passer la vérification d'inférence post-export",
+        # NOTE : --skip-verify est passé par défaut dans le Makefile (make export-model).
+        # La vérification via FastLanguageModel sur un modèle fusionné rechargé crash
+        # car Unsloth patche model.generate (unsloth_fast_generate) et route vers
+        # fast_forward_inference dès qu'un past_key_values est présent — incompatible
+        # avec les shapes des rotary embeddings d'un modèle rechargé depuis le disque.
+        # Pour vérifier manuellement : uv run python 22_export_model.py (sans --skip-verify).
+        help="Passer la vérification d'inférence post-export (défaut dans le Makefile)",
     )
     parser.add_argument(
         "--push-to-hub",
