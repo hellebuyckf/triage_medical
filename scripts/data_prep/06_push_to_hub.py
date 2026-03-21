@@ -23,10 +23,16 @@ Authentification :
     Fallback : variable d'environnement HF_TOKEN déjà définie dans le shell.
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from loguru import Logger
 
 from dotenv import load_dotenv
 
@@ -41,7 +47,6 @@ load_dotenv(dotenv_path=_PROJECT_ROOT / ".env", override=False)
 
 from datasets import Dataset, DatasetDict, load_from_disk
 from huggingface_hub import DatasetCard, DatasetCardData
-from loguru import Logger
 from utils import get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent

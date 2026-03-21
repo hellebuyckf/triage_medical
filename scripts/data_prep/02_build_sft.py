@@ -1,9 +1,15 @@
 """Script 02 — Build the unified SFT dataset (~5,000 instruction/response pairs)."""
 
+from __future__ import annotations
+
 import argparse
 import sys
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from loguru import Logger
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -11,7 +17,6 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 import pandas as pd
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
-from loguru import Logger
 from utils import (
     SFT_COLUMNS,
     format_triage_response,

@@ -8,6 +8,10 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from loguru import Logger
 
 import torch
 import yaml
@@ -35,7 +39,6 @@ import mlflow
 import mlflow.transformers
 from datasets import load_from_disk
 from dotenv import load_dotenv
-from loguru import Logger
 from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import SFTConfig, SFTTrainer
 from utils import get_latest_checkpoint, get_logger

@@ -1,18 +1,23 @@
 """Script 05 — Train/val/test split, validation and final report."""
 
+from __future__ import annotations
+
 import argparse
 import shutil
 import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from loguru import Logger
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from datasets import Dataset, DatasetDict
-from loguru import Logger
 from utils import DPO_COLUMNS, SFT_COLUMNS, get_logger, md5_hash
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent

@@ -1,16 +1,21 @@
 """Script 01 — Download HuggingFace datasets to data/raw/."""
 
+from __future__ import annotations
+
 import argparse
 import random
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from loguru import Logger
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from datasets import Dataset, DatasetDict, load_dataset
-from loguru import Logger
 from utils import get_logger, load_datasets_config
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
