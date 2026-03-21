@@ -252,12 +252,12 @@ def print_export_summary(export_dir: Path, logger) -> None:
     total_bytes = sum(f.stat().st_size for f in files if f.is_file())
     total_gb = total_bytes / 1e9
 
-    logger.info("Fichiers exportés dans %s :", export_dir)
+    logger.info("Fichiers exportés dans {} :", export_dir)
     for f in files:
         if f.is_file():
             size_mb = f.stat().st_size / 1e6
-            logger.info("  %-50s %8.1f MB", f.name, size_mb)
-    logger.info("Taille totale : %.2f GB", total_gb)
+            logger.info("  {:<50} {:8.1f} MB", f.name, size_mb)
+    logger.info("Taille totale : {:.2f} GB", total_gb)
 
 
 def main() -> None:
@@ -297,12 +297,12 @@ def main() -> None:
     # SAUF si --push-to-hub est demandé (on recharge depuis l'export local).
     merged_config = EXPORT_DIR / "config.json"
     if merged_config.exists() and not args.push_to_hub:
-        logger.info("Modèle fusionné déjà présent : %s — skip.", EXPORT_DIR)
+        logger.info("Modèle fusionné déjà présent : {} — skip.", EXPORT_DIR)
         return
 
     if merged_config.exists() and args.push_to_hub:
         logger.info(
-            "Modèle fusionné déjà présent dans %s — push vers HF Hub sans re-fusionner.",
+            "Modèle fusionné déjà présent dans {} — push vers HF Hub sans re-fusionner.",
             EXPORT_DIR,
         )
         model, tokenizer = FastLanguageModel.from_pretrained(
@@ -313,20 +313,20 @@ def main() -> None:
         )
         model.push_to_hub(args.repo_id, safe_serialization=True)
         tokenizer.push_to_hub(args.repo_id)
-        logger.info("Modèle poussé sur HF Hub : %s", args.repo_id)
+        logger.info("Modèle poussé sur HF Hub : {}", args.repo_id)
         return
 
     # Vérifications préalables
     if not (SFT_CHECKPOINT / "adapter_model.safetensors").exists():
         logger.error(
-            "Checkpoint SFT non trouvé : %s. Lancer 11_train_sft.py d'abord.",
+            "Checkpoint SFT non trouvé : {}. Lancer 11_train_sft.py d'abord.",
             SFT_CHECKPOINT,
         )
         sys.exit(1)
 
     if not (DPO_CHECKPOINT / "adapter_model.safetensors").exists():
         logger.error(
-            "Checkpoint DPO non trouvé : %s. Lancer 20_train_dpo.py d'abord.",
+            "Checkpoint DPO non trouvé : {}. Lancer 20_train_dpo.py d'abord.",
             DPO_CHECKPOINT,
         )
         sys.exit(1)
@@ -338,7 +338,7 @@ def main() -> None:
     )
 
     # Sauvegarde via Unsloth (merged_16bit)
-    logger.info("Sauvegarde du modèle fusionné dans %s ...", EXPORT_DIR)
+    logger.info("Sauvegarde du modèle fusionné dans {} ...", EXPORT_DIR)
     save_merged_model(
         model,
         tokenizer,
@@ -355,7 +355,7 @@ def main() -> None:
     if not args.skip_verify:
         verify_export(EXPORT_DIR, VERIFY_PROMPT, logger)
 
-    logger.info("=== Export DPO terminé. Modèle prêt dans %s ===", EXPORT_DIR)
+    logger.info("=== Export DPO terminé. Modèle prêt dans {} ===", EXPORT_DIR)
 
 
 if __name__ == "__main__":

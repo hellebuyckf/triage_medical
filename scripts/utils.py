@@ -1,11 +1,18 @@
 """Module partagé — constantes, filtres qualité, inférence d'urgence, logging."""
 
+from __future__ import annotations
+
 import hashlib
-import logging
 import re
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
+from loguru import logger as _loguru_logger
+
+if TYPE_CHECKING:
+    from loguru import Logger as _LoguruLogger
 
 # ── Schémas de données ───────────────────────────────────────────────────────
 
@@ -593,16 +600,44 @@ def load_datasets_config(config_path: Path, project_root: Path) -> dict:
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
+_HANDLER_ID: int | None = None
 
-def get_logger(name: str, verbose: bool = False) -> logging.Logger:
-    """Logger formaté avec timestamp et nom du script."""
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        fmt = logging.Formatter(
-            "%(asctime)s [%(name)s] %(levelname)s — %(message)s", datefmt="%H:%M:%S"
-        )
-        handler.setFormatter(fmt)
-        logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
-    return logger
+
+def get_logger(name: str, verbose: bool = False) -> _LoguruLogger:
+    """Configure loguru et retourne un logger contextualisé avec le nom du script.
+
+    Supprime le handler précédent pour éviter les doublons en cas d'appels multiples.
+    Format : HH:MM:SS [script] LEVEL — message (colorisé sur TTY).
+
+    Args:
+        name: Nom du script (ex: "11_train_sft"), affiché entre crochets.
+        verbose: Si True, active le niveau DEBUG (défaut : INFO).
+
+    Returns:
+        Logger loguru contextualisé prêt à l'emploi.
+    """
+    global _HANDLER_ID
+
+    level = "DEBUG" if verbose else "INFO"
+
+    # Supprimer le handler précédent (évite les lignes en double)
+    if _HANDLER_ID is not None:
+        try:
+            _loguru_logger.remove(_HANDLER_ID)
+        except ValueError:
+            pass
+    else:
+        # Supprimer le handler stderr par défaut de loguru (id=0)
+        try:
+            _loguru_logger.remove(0)
+        except ValueError:
+            pass
+
+    _HANDLER_ID = _loguru_logger.add(
+        sys.stderr,
+        format="<green>{time:HH:mm:ss}</green> [<cyan>{extra[script]}</cyan>] <level>{level: <8}</level> — {message}",
+        level=level,
+        colorize=True,
+    )
+
+    return _loguru_logger.bind(script=name)

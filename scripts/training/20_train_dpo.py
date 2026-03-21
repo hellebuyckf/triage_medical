@@ -345,7 +345,7 @@ def main() -> None:
     # Idempotence
     adapter_path = DPO_CHECKPOINT / "adapter_model.safetensors"
     if adapter_path.exists():
-        logger.info("Adaptateur DPO déjà présent : %s — skip.", adapter_path)
+        logger.info("Adaptateur DPO déjà présent : {} — skip.", adapter_path)
         return
 
     # Vérifications préalables
@@ -356,7 +356,7 @@ def main() -> None:
         sys.exit(1)
 
     if not DPO_FINAL_DIR.exists():
-        logger.error("Dataset manquant : %s. Lancer le pipeline S1 d'abord.", DPO_FINAL_DIR)
+        logger.error("Dataset manquant : {}. Lancer le pipeline S1 d'abord.", DPO_FINAL_DIR)
         sys.exit(1)
 
     # Resume depuis un checkpoint intermédiaire ?
@@ -369,7 +369,7 @@ def main() -> None:
     # Chargement du modèle (base + SFT merged + DPO LoRA)
     # Le tokenizer est nécessaire pour formater les datasets via apply_chat_template.
     logger.info(
-        "Chargement du modèle : base + SFT merged + DPO LoRA (r=%d, beta=%.2f)...",
+        "Chargement du modèle : base + SFT merged + DPO LoRA (r={}, beta={:.2f})...",
         LORA_R,
         BETA,
     )
@@ -378,7 +378,7 @@ def main() -> None:
     # Chargement et formatage des datasets (nécessite le tokenizer pour apply_chat_template)
     logger.info("Chargement des datasets DPO...")
     train_dataset, val_dataset = load_dpo_datasets(DPO_FINAL_DIR, tokenizer)
-    logger.info("  train: %d paires | val: %d paires", len(train_dataset), len(val_dataset))
+    logger.info("  train: {} paires | val: {} paires", len(train_dataset), len(val_dataset))
     log_model_info(model, logger)
 
     # Configuration MLflow
@@ -439,7 +439,7 @@ def main() -> None:
         DPO_CHECKPOINT.mkdir(parents=True, exist_ok=True)
         trainer.save_model(str(DPO_CHECKPOINT))
         tokenizer.save_pretrained(str(DPO_CHECKPOINT))
-        logger.info("Adaptateur LoRA DPO sauvegardé dans %s", DPO_CHECKPOINT)
+        logger.info("Adaptateur LoRA DPO sauvegardé dans {}", DPO_CHECKPOINT)
 
         # pip_requirements is set explicitly to bypass mlflow's auto-detection,
         # which tries to import tensorflow (not installed) and crashes.

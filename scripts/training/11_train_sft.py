@@ -258,7 +258,7 @@ def main() -> None:
     # Idempotence : vérifier si l'adaptateur final existe
     adapter_path = CHECKPOINT_DIR / "adapter_model.safetensors"
     if adapter_path.exists():
-        logger.info("Adaptateur LoRA déjà présent : %s — skip.", adapter_path)
+        logger.info("Adaptateur LoRA déjà présent : {} — skip.", adapter_path)
         return
 
     # Vérifier les données tokenisées
@@ -280,7 +280,7 @@ def main() -> None:
     logger.info("Chargement des datasets tokenisés...")
     train_dataset = load_from_disk(str(TOKENIZED_DIR / "train"))
     val_dataset = load_from_disk(str(TOKENIZED_DIR / "val"))
-    logger.info("  train: %d | val: %d", len(train_dataset), len(val_dataset))
+    logger.info("  train: {} | val: {}", len(train_dataset), len(val_dataset))
 
     # Pré-concaténation prompt+completion en colonne "text"
     train_dataset = train_dataset.map(lambda x: {"text": x["prompt"] + x["completion"]})
@@ -288,7 +288,7 @@ def main() -> None:
 
     # Chargement du modèle + LoRA
     logger.info(
-        "Chargement du modèle %s + LoRA (r=%d, alpha=%d)...", MODEL_NAME, LORA_R, LORA_ALPHA
+        "Chargement du modèle {} + LoRA (r={}, alpha={})...", MODEL_NAME, LORA_R, LORA_ALPHA
     )
     model, tokenizer = load_model_and_tokenizer(MODEL_NAME, MAX_SEQ_LENGTH)
     log_model_info(model, logger)
@@ -341,7 +341,7 @@ def main() -> None:
         CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
         trainer.save_model(str(CHECKPOINT_DIR))
         tokenizer.save_pretrained(str(CHECKPOINT_DIR))
-        logger.info("Adaptateur LoRA sauvegardé dans %s", CHECKPOINT_DIR)
+        logger.info("Adaptateur LoRA sauvegardé dans {}", CHECKPOINT_DIR)
 
         # Sauvegarde des hyperparamètres d'entraînement pour les rapports d'évaluation
         training_config = {
@@ -360,7 +360,7 @@ def main() -> None:
         (CHECKPOINT_DIR / "training_config.json").write_text(
             json.dumps(training_config, indent=2), encoding="utf-8"
         )
-        logger.info("Hyperparamètres sauvegardés dans %s/training_config.json", CHECKPOINT_DIR)
+        logger.info("Hyperparamètres sauvegardés dans {}/training_config.json", CHECKPOINT_DIR)
 
         # Log the PEFT model natively — mlflow.transformers handles PeftModel
         # serialisation, tokenizer packaging, and Model Registry registration

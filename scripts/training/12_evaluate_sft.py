@@ -276,7 +276,7 @@ def evaluate_split(
     if n_eval is not None and n_eval < len(df):
         df = df.sample(n=n_eval, random_state=SEED).reset_index(drop=True)
         if logger:
-            logger.info("[%s] Sous-échantillon de %d exemples.", split_name, n_eval)
+            logger.info("[{}] Sous-échantillon de {} exemples.", split_name, n_eval)
 
     n_total = len(df)
     predictions: list[dict] = []
@@ -290,7 +290,7 @@ def evaluate_split(
             model, tokenizer, instructions, batch_size=batch_size
         )
         if n_oom > 0 and logger:
-            logger.warning("[%s] %d examples skipped due to CUDA OOM.", split_name, n_oom)
+            logger.warning("[{}] {} examples skipped due to CUDA OOM.", split_name, n_oom)
 
         for i, (_, row) in enumerate(df.iterrows()):
             generated = generated_responses[i]
@@ -371,7 +371,7 @@ def evaluate_split(
 
         if logger:
             logger.info(
-                "[%s] accuracy=%.2f%% | f1_macro=%.4f | recall_macro=%.4f | f2_macro=%.4f | format=%.1f%% | unparseable=%d | oom=%d | %.0fs",
+                "[{}] accuracy={:.2f}% | f1_macro={:.4f} | recall_macro={:.4f} | f2_macro={:.4f} | format={:.1f}% | unparseable={} | oom={} | {:.0f}s",
                 split_name,
                 accuracy * 100,
                 f1_macro,
@@ -634,7 +634,7 @@ def main() -> None:
 
     # Vérification du dataset
     if not SFT_FINAL_DIR.exists():
-        logger.error("Dataset manquant : %s", SFT_FINAL_DIR)
+        logger.error("Dataset manquant : {}", SFT_FINAL_DIR)
         sys.exit(1)
 
     # Le start_run en début de main() rattache tous les spans @mlflow.trace
@@ -645,7 +645,7 @@ def main() -> None:
     mlflow.enable_system_metrics_logging()
     with mlflow.start_run(run_name="eval-sft"):
         # Chargement du modèle
-        logger.info("Chargement du modèle fine-tuné depuis %s...", CHECKPOINT_DIR)
+        logger.info("Chargement du modèle fine-tuné depuis {}...", CHECKPOINT_DIR)
         model, tokenizer = load_finetuned_model(MODEL_NAME, CHECKPOINT_DIR, MAX_SEQ_LENGTH)
         logger.info("Modèle chargé en mode inférence.")
 
@@ -657,7 +657,7 @@ def main() -> None:
         urgency_feature = sft["test"].features["urgency_level"]
         df_test = pd.DataFrame(sft["test"].to_pandas())
         df_test["urgency_level"] = df_test["urgency_level"].map(urgency_feature.int2str)
-        logger.info("Test: %d exemples", len(df_test))
+        logger.info("Test: {} exemples", len(df_test))
 
         # Évaluation val (optionnelle — biaisée, désactivée par défaut)
         val_metrics = None
@@ -710,7 +710,7 @@ def main() -> None:
         )
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(report, encoding="utf-8")
-        logger.info("Rapport d'évaluation sauvegardé dans %s", report_path)
+        logger.info("Rapport d'évaluation sauvegardé dans {}", report_path)
 
         # Métriques + artefacts
         metrics_to_log = {

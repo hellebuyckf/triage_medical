@@ -268,7 +268,7 @@ def evaluate_split(
     if n_eval is not None and n_eval < len(df):
         df = df.sample(n=n_eval, random_state=SEED).reset_index(drop=True)
         if logger:
-            logger.info("[%s] Sous-échantillon de %d exemples.", split_name, n_eval)
+            logger.info("[{}] Sous-échantillon de {} exemples.", split_name, n_eval)
 
     n_total = len(df)
     predictions: list[dict] = []
@@ -282,7 +282,7 @@ def evaluate_split(
             model, tokenizer, instructions, batch_size=batch_size
         )
         if n_oom > 0 and logger:
-            logger.warning("[%s] %d exemples sautés pour CUDA OOM.", split_name, n_oom)
+            logger.warning("[{}] {} exemples sautés pour CUDA OOM.", split_name, n_oom)
 
         for i, (_, row) in enumerate(df.iterrows()):
             generated = generated_responses[i]
@@ -348,7 +348,7 @@ def evaluate_split(
 
         if logger:
             logger.info(
-                "[%s] accuracy=%.2f%% | f1=%.4f | recall_macro=%.4f | f2_macro=%.4f | format=%.1f%% | unparseable=%d | oom=%d | %.0fs",
+                "[{}] accuracy={:.2f}% | f1={:.4f} | recall_macro={:.4f} | f2_macro={:.4f} | format={:.1f}% | unparseable={} | oom={} | {:.0f}s",
                 split_name,
                 accuracy * 100,
                 f1,
@@ -643,12 +643,12 @@ def main() -> None:
         DPO_CHECKPOINT / "adapter_model.safetensors",
     ]:
         if not path.exists():
-            logger.error("Checkpoint manquant : %s", path)
+            logger.error("Checkpoint manquant : {}", path)
             sys.exit(1)
 
     for path in [SFT_FINAL_DIR, DPO_FINAL_DIR]:
         if not path.exists():
-            logger.error("Dataset manquant : %s", path)
+            logger.error("Dataset manquant : {}", path)
             sys.exit(1)
 
     # Le start_run en début de main() rattache tous les spans @mlflow.trace
@@ -665,7 +665,7 @@ def main() -> None:
         urgency_feature = sft["test"].features["urgency_level"]
         df_test = pd.DataFrame(sft["test"].to_pandas())
         df_test["urgency_level"] = df_test["urgency_level"].map(urgency_feature.int2str)
-        logger.info("Test: %d exemples SFT", len(df_test))
+        logger.info("Test: {} exemples SFT", len(df_test))
 
         # ── Chargement unique du modèle ───────────────────────────────────────
         # Un seul modèle (base + SFT merged + DPO LoRA) est maintenu en VRAM.
@@ -708,7 +708,7 @@ def main() -> None:
         )
 
         # ── Comparaisons qualitatives ─────────────────────────────────────────
-        logger.info("Génération de %d comparaisons qualitatives SFT vs DPO...", args.n_comparisons)
+        logger.info("Génération de {} comparaisons qualitatives SFT vs DPO...", args.n_comparisons)
         comparisons = compare_responses_on_dpo_val(
             model, tokenizer, DPO_FINAL_DIR, n=args.n_comparisons, batch_size=args.batch_size
         )
@@ -719,7 +719,7 @@ def main() -> None:
         report_path = REPORTS_DIR / f"eval_report_{run_timestamp}.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(report, encoding="utf-8")
-        logger.info("Rapport sauvegardé dans %s", report_path)
+        logger.info("Rapport sauvegardé dans {}", report_path)
 
         metrics_to_log = {
             "sft_test_accuracy": sft_test["accuracy"],

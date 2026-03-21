@@ -157,25 +157,25 @@ def push_dataset(
         ``True`` if the dataset was pushed successfully, ``False`` otherwise.
     """
     if not path.exists():
-        logger.warning("Dataset not found: %s — skip.", path)
+        logger.warning("Dataset not found: {} — skip.", path)
         return False
 
-    logger.info("Loading %s...", path)
+    logger.info("Loading {}...", path)
     ds: Dataset | DatasetDict = load_from_disk(str(path))  # type: ignore[assignment]
 
     if isinstance(ds, DatasetDict):
-        logger.info("  Splits: %s", {name: len(split) for name, split in ds.items()})
+        logger.info("  Splits: {}", {name: len(split) for name, split in ds.items()})
     else:
-        logger.info("  %d examples.", len(ds))
+        logger.info("  {} examples.", len(ds))
 
-    logger.info("Pushing to hub: %s (private=%s)...", repo_id, private)
+    logger.info("Pushing to hub: {} (private={})...", repo_id, private)
     try:
         ds.push_to_hub(repo_id, private=private)
     except Exception as exc:
-        logger.error("  ✗ Push failed for %s: %s", repo_id, exc)
+        logger.error("  ✗ Push failed for {}: {}", repo_id, exc)
         return False
 
-    logger.info("  ✓ %s published.", repo_id)
+    logger.info("  ✓ {} published.", repo_id)
 
     # ── Dataset card ──────────────────────────────────────────────────────────
     repo_suffix = repo_id.split("/")[-1]
@@ -189,12 +189,12 @@ def push_dataset(
                 description=meta["description"],
             )
             card.push_to_hub(repo_id)
-            logger.info("  ✓ Dataset card pushed for %s.", repo_id)
+            logger.info("  ✓ Dataset card pushed for {}.", repo_id)
         except Exception as exc:
             # Card failure is non-blocking: data is already on the hub.
-            logger.warning("  ⚠ Dataset card push failed for %s: %s", repo_id, exc)
+            logger.warning("  ⚠ Dataset card push failed for {}: {}", repo_id, exc)
     else:
-        logger.warning("  No metadata found for '%s' — card skipped.", repo_suffix)
+        logger.warning("  No metadata found for '{}' — card skipped.", repo_suffix)
 
     return True
 
@@ -245,7 +245,7 @@ def main() -> None:
     # Vérification du token avant tout push
     hf_token = os.environ.get("HF_TOKEN", "")
     if hf_token:
-        logger.info("Token HF_TOKEN chargé (%s...%s).", hf_token[:6], hf_token[-4:])
+        logger.info("Token HF_TOKEN chargé ({}...{}).", hf_token[:6], hf_token[-4:])
     else:
         logger.warning(
             "HF_TOKEN introuvable dans .env ni dans l'environnement. "
@@ -282,7 +282,7 @@ def main() -> None:
                 failed.append(repo_id)
 
     if failed:
-        logger.error("=== %d push(es) failed: %s ===", len(failed), failed)
+        logger.error("=== {} push(es) failed: {} ===", len(failed), failed)
         sys.exit(1)
 
     logger.info("=== All datasets published successfully. ===")

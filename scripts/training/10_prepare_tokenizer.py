@@ -208,15 +208,15 @@ def main() -> None:
 
     # Idempotence
     if (TOKENIZED_DIR / "train").exists():
-        logger.info("Tokenized datasets already present in %s — skip.", TOKENIZED_DIR)
+        logger.info("Tokenized datasets already present in {} — skip.", TOKENIZED_DIR)
         return
 
     if not SFT_FINAL_DIR.exists():
-        logger.error("Missing dataset: %s. Run the S1 pipeline first.", SFT_FINAL_DIR)
+        logger.error("Missing dataset: {}. Run the S1 pipeline first.", SFT_FINAL_DIR)
         sys.exit(1)
 
     # Load tokenizer
-    logger.info("Loading tokenizer from %s...", MODEL_NAME)
+    logger.info("Loading tokenizer from {}...", MODEL_NAME)
     tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(MODEL_NAME)
     tokenizer.padding_side = "right"
     if tokenizer.pad_token is None:
@@ -237,42 +237,42 @@ def main() -> None:
         )
 
     logger.info(
-        "Tokenizer loaded. Vocab size: %d, pad_token: '%s'",
+        "Tokenizer loaded. Vocab size: {}, pad_token: '{}'",
         tokenizer.vocab_size,
         tokenizer.pad_token,
     )
 
     # Load splits directly as Dataset — no pandas conversion
-    logger.info("Loading splits from %s...", SFT_FINAL_DIR)
+    logger.info("Loading splits from {}...", SFT_FINAL_DIR)
     sft: DatasetDict = DatasetDict(load_from_disk(str(SFT_FINAL_DIR)))  # type: ignore[arg-type]
     ds_train: Dataset = sft["train"]
     ds_val: Dataset = sft["val"]
     ds_test: Dataset = sft["test"]
-    logger.info("  train: %d | val: %d | test: %d", len(ds_train), len(ds_val), len(ds_test))
+    logger.info("  train: {} | val: {} | test: {}", len(ds_train), len(ds_val), len(ds_test))
 
     # Token-length analysis on train set
     logger.info("Analysing token lengths (train set)...")
     stats = analyze_lengths(ds_train, tokenizer, MAX_SEQ_LENGTH)
     logger.info("Length distribution:")
     for key in ["p50", "p75", "p90", "p95", "p99", "max", "mean"]:
-        logger.info("  %s: %s", key, stats[key])
+        logger.info("  {}: {}", key, stats[key])
 
     if stats["n_truncated"] > 0:
         logger.warning(
-            "%d examples (%.1f%%) exceed MAX_SEQ_LENGTH=%d and will be truncated.",
+            "{} examples ({:.1f}%) exceed MAX_SEQ_LENGTH={} and will be truncated.",
             stats["n_truncated"],
             stats["pct_truncated"],
             MAX_SEQ_LENGTH,
         )
     else:
-        logger.info("No examples exceed MAX_SEQ_LENGTH=%d.", MAX_SEQ_LENGTH)
+        logger.info("No examples exceed MAX_SEQ_LENGTH={}.", MAX_SEQ_LENGTH)
 
     if stats["p95"] <= 512:
-        logger.info("Recommendation: MAX_SEQ_LENGTH=512 is sufficient (p95=%d).", stats["p95"])
+        logger.info("Recommendation: MAX_SEQ_LENGTH=512 is sufficient (p95={}).", stats["p95"])
     elif stats["p95"] <= 1024:
-        logger.info("Recommendation: MAX_SEQ_LENGTH=1024 is appropriate (p95=%d).", stats["p95"])
+        logger.info("Recommendation: MAX_SEQ_LENGTH=1024 is appropriate (p95={}).", stats["p95"])
     else:
-        logger.info("Recommendation: MAX_SEQ_LENGTH=2048 required (p95=%d).", stats["p95"])
+        logger.info("Recommendation: MAX_SEQ_LENGTH=2048 required (p95={}).", stats["p95"])
 
     # Format to prompt/completion
     logger.info("Formatting splits to prompt/completion...")
@@ -287,7 +287,7 @@ def main() -> None:
     for name, ds in splits.items():
         out_path = TOKENIZED_DIR / name
         ds.save_to_disk(str(out_path))
-        logger.info("  %s: %d examples saved to %s", name, len(ds), out_path)
+        logger.info("  {}: {} examples saved to {}", name, len(ds), out_path)
 
     logger.info("=== Preparation complete. ===")
 
