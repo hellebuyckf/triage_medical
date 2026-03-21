@@ -194,3 +194,5 @@ scripts/training/__pycache__/
 scripts/data_prep/__pycache__/
 # Unsloth — cache de compilation généré automatiquement
 unsloth_compiled_cache/
+# Evaluation reports
+reports/
