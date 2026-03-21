@@ -1,12 +1,12 @@
 training:
   # 1024 tokens covers ~95th percentile of instruction+response lengths (see tokenizer stats).
   max_seq_length: 1024
-  # 2e-4 is the standard LoRA learning rate — high enough for fast convergence,
-  # low enough to avoid catastrophic forgetting on the base model.
+  # 2e-4 is the standard LoRA learning rate — kept from v1, no indication it's the bottleneck.
   learning_rate: 0.0002
-  # 5 epochs on ~5k examples = ~6 250 steps with eff. batch 16. Sufficient for SFT
-  # convergence without overfitting (val loss plateau observed around epoch 3-4).
-  epochs: 5
+  # 5 → 8 epochs: v1 val loss plateaued early globally, but moderate class recall (38%)
+  # suggests its decision boundary hadn't converged. More steps help the model discriminate
+  # the "in-between" class without overfitting (dataset is ~5k, reasonably regularised by LoRA).
+  epochs: 8
   # Effective batch = batch_size * grad_accum = 4 * 4 = 16.
   # 4 per device fits in 8GB VRAM with bf16 + LoRA on Qwen3-1.7B.
   batch_size: 4
@@ -14,13 +14,15 @@ training:
   seed: 42
 
 lora:
-  # r=32 offers a good quality/parameter tradeoff for a 1.7B model on a task-specific dataset.
-  # Higher r (64) showed no significant gain on val metrics during initial experiments.
-  r: 32
-  # alpha = 2*r is the standard scaling heuristic (effective LR ≈ lr * alpha/r = lr * 2).
-  alpha: 64
-  # Light dropout (0.05) to regularise without hurting convergence speed.
-  dropout: 0.05
+  # 32 → 64: v1 had poor moderate recall (38%). Higher r gives the adapter more capacity
+  # to learn the nuanced 3-class boundary (max vs moderate vs deferred).
+  # Note: doubles trainable params (~25M → ~50M), well within VRAM budget on RTX 4060 Ti.
+  r: 64
+  # alpha = 2*r maintains the standard scaling heuristic (effective LR ≈ lr * alpha/r = lr * 2).
+  alpha: 128
+  # 0.05 → 0.0: with ~5k training examples, LoRA dropout hurts more than it helps.
+  # The dataset is small enough that we want the adapter to memorise the decision boundaries.
+  dropout: 0.0
   # All attention projections + FFN gates — full coverage for chat/instruction following.
   target_modules:
     - q_proj
