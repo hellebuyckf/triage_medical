@@ -1,9 +1,12 @@
 """Script 11 — Entraînement SFT de Qwen3-1.7B avec LoRA via Unsloth + TRL."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -32,6 +35,7 @@ import mlflow
 import mlflow.transformers
 from datasets import load_from_disk
 from dotenv import load_dotenv
+from loguru import Logger
 from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import SFTConfig, SFTTrainer
 from utils import get_latest_checkpoint, get_logger
@@ -44,17 +48,6 @@ load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 MODEL_NAME = os.getenv("MODEL_NAME", "unsloth/Qwen3-1.7B")
 TOKENIZED_DIR = PROJECT_ROOT / "data" / "processed" / "sft_tokenized"
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "sft"
-
-MAX_SEQ_LENGTH = 1024
-LORA_R = 32
-LORA_ALPHA = 64
-LORA_DROPOUT = 0.05
-LORA_TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-LEARNING_RATE = 2e-4
-EPOCHS = 5
-BATCH_SIZE = 4
-GRAD_ACCUM = 4
-SEED = 42
 
 MLFLOW_EXPERIMENT = "sft-qwen3-1.7b-triage"
 MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
@@ -80,20 +73,77 @@ def load_training_config(config_path: Path) -> dict:
         return yaml.safe_load(f)
 
 
+# ── Config dataclass ───────────────────────────────────────────────────────────
+
+
+@dataclass
+class SFTTrainingConfig:
+    """Hyperparameters for SFT training, loaded from sft.yaml.
+
+    Attributes:
+        max_seq_length: Maximum token sequence length.
+        learning_rate: LoRA learning rate.
+        epochs: Number of training epochs.
+        batch_size: Per-device training batch size.
+        grad_accum: Gradient accumulation steps (effective batch = batch_size * grad_accum).
+        seed: Global random seed for reproducibility.
+        lora_r: LoRA rank.
+        lora_alpha: LoRA scaling factor (effective LR ≈ lr * alpha / r).
+        lora_dropout: LoRA dropout rate.
+        lora_target_modules: Module names to apply LoRA to.
+    """
+
+    max_seq_length: int
+    learning_rate: float
+    epochs: int
+    batch_size: int
+    grad_accum: int
+    seed: int
+    lora_r: int
+    lora_alpha: int
+    lora_dropout: float
+    lora_target_modules: list[str]
+
+    @classmethod
+    def from_yaml(cls, cfg: dict) -> SFTTrainingConfig:
+        """Build from a parsed YAML config dict.
+
+        Args:
+            cfg: Parsed YAML dict with top-level keys ``training`` and ``lora``.
+
+        Returns:
+            Populated ``SFTTrainingConfig`` instance.
+        """
+        t = cfg["training"]
+        lora = cfg["lora"]
+        return cls(
+            max_seq_length=t["max_seq_length"],
+            learning_rate=t["learning_rate"],
+            epochs=t["epochs"],
+            batch_size=t["batch_size"],
+            grad_accum=t["grad_accum"],
+            seed=t["seed"],
+            lora_r=lora["r"],
+            lora_alpha=lora["alpha"],
+            lora_dropout=lora["dropout"],
+            lora_target_modules=lora["target_modules"],
+        )
+
+
 # ── Fonctions ─────────────────────────────────────────────────────────────────
 
 
 @mlflow.trace(span_type="RETRIEVER", name="load_model_and_tokenizer")
 def load_model_and_tokenizer(
     model_name: str,
-    max_seq_length: int,
+    cfg: SFTTrainingConfig,
     load_in_4bit: bool = False,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizerFast]:
     """Charge le modèle via Unsloth et applique la configuration LoRA.
 
     Args:
         model_name: Identifiant du modèle sur HuggingFace Hub.
-        max_seq_length: Longueur maximale de séquence.
+        cfg: Configuration d'entraînement SFT (max_seq_length, paramètres LoRA...).
         load_in_4bit: Quantification 4-bit si GPU < 16 GB.
 
     Returns:
@@ -101,41 +151,42 @@ def load_model_and_tokenizer(
     """
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name,
-        max_seq_length=max_seq_length,
+        max_seq_length=cfg.max_seq_length,
         dtype=None,
         load_in_4bit=load_in_4bit,
     )
 
     model = FastLanguageModel.get_peft_model(
         model,
-        r=LORA_R,
-        target_modules=LORA_TARGET_MODULES,
-        lora_alpha=LORA_ALPHA,
-        lora_dropout=LORA_DROPOUT,
+        r=cfg.lora_r,
+        target_modules=cfg.lora_target_modules,
+        lora_alpha=cfg.lora_alpha,
+        lora_dropout=cfg.lora_dropout,
         bias="none",
         use_gradient_checkpointing="unsloth",
-        random_state=SEED,
+        random_state=cfg.seed,
     )
 
     return model, tokenizer
 
 
-def build_sft_config(output_dir: Path) -> SFTConfig:
+def build_sft_config(output_dir: Path, cfg: SFTTrainingConfig) -> SFTConfig:
     """Construit la configuration SFT pour TRL 0.29.
 
     Args:
         output_dir: Répertoire de sortie pour les checkpoints.
+        cfg: Configuration d'entraînement SFT.
 
     Returns:
         Configuration SFT complète.
     """
     return SFTConfig(
         output_dir=str(output_dir),
-        num_train_epochs=EPOCHS,
-        per_device_train_batch_size=BATCH_SIZE,
-        per_device_eval_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=GRAD_ACCUM,
-        learning_rate=LEARNING_RATE,
+        num_train_epochs=cfg.epochs,
+        per_device_train_batch_size=cfg.batch_size,
+        per_device_eval_batch_size=cfg.batch_size,
+        gradient_accumulation_steps=cfg.grad_accum,
+        learning_rate=cfg.learning_rate,
         lr_scheduler_type="cosine",
         warmup_steps=50,
         weight_decay=0.01,
@@ -153,8 +204,8 @@ def build_sft_config(output_dir: Path) -> SFTConfig:
         greater_is_better=False,
         report_to="mlflow",
         run_name="sft-qwen3-1.7b-triage",
-        seed=SEED,
-        max_length=MAX_SEQ_LENGTH,
+        seed=cfg.seed,
+        max_length=cfg.max_seq_length,
         packing=False,
         # TRL 0.29 native prompt/completion masking: loss is computed only on
         # completion tokens when the dataset has "prompt" and "completion" columns.
@@ -194,7 +245,7 @@ def build_trainer(
     )
 
 
-def log_model_info(model: PreTrainedModel, logger) -> None:
+def log_model_info(model: PreTrainedModel, logger: Logger) -> None:
     """Affiche le nombre de paramètres total vs entraînables (LoRA).
 
     Args:
@@ -234,26 +285,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    cfg = load_training_config(args.config)
-    t = cfg["training"]
-    lora = cfg["lora"]
-
-    global MAX_SEQ_LENGTH, LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES
-    global LEARNING_RATE, EPOCHS, BATCH_SIZE, GRAD_ACCUM, SEED
-
-    MAX_SEQ_LENGTH = t["max_seq_length"]
-    LORA_R = lora["r"]
-    LORA_ALPHA = lora["alpha"]
-    LORA_DROPOUT = lora["dropout"]
-    LORA_TARGET_MODULES = lora["target_modules"]
-    LEARNING_RATE = t["learning_rate"]
-    EPOCHS = t["epochs"]
-    BATCH_SIZE = t["batch_size"]
-    GRAD_ACCUM = t["grad_accum"]
-    SEED = t["seed"]
+    training_cfg = SFTTrainingConfig.from_yaml(load_training_config(args.config))
 
     logger = get_logger("11_train_sft", verbose=args.verbose)
-    set_seed(SEED)
+    set_seed(training_cfg.seed)
 
     # Idempotence : vérifier si l'adaptateur final existe
     adapter_path = CHECKPOINT_DIR / "adapter_model.safetensors"
@@ -288,9 +323,12 @@ def main() -> None:
 
     # Chargement du modèle + LoRA
     logger.info(
-        "Chargement du modèle {} + LoRA (r={}, alpha={})...", MODEL_NAME, LORA_R, LORA_ALPHA
+        "Chargement du modèle {} + LoRA (r={}, alpha={})...",
+        MODEL_NAME,
+        training_cfg.lora_r,
+        training_cfg.lora_alpha,
     )
-    model, tokenizer = load_model_and_tokenizer(MODEL_NAME, MAX_SEQ_LENGTH)
+    model, tokenizer = load_model_and_tokenizer(MODEL_NAME, training_cfg)
     log_model_info(model, logger)
 
     # Configuration MLflow
@@ -303,7 +341,7 @@ def main() -> None:
     # pour les métriques de steps (loss curves) au lieu de créer un nested run.
     with mlflow.start_run(run_name="sft-qwen3-1.7b-triage"):
         # Configuration SFT + Trainer
-        config = build_sft_config(CHECKPOINT_DIR)
+        config = build_sft_config(CHECKPOINT_DIR, training_cfg)
         trainer = build_trainer(model, tokenizer, train_dataset, val_dataset, config)
         logger.info("Loss masking enabled: gradient computed on completion tokens only.")
 
@@ -311,14 +349,14 @@ def main() -> None:
         mlflow.log_params(
             {
                 "model_name": MODEL_NAME,
-                "lora_r": LORA_R,
-                "lora_alpha": LORA_ALPHA,
-                "lora_dropout": LORA_DROPOUT,
-                "learning_rate": LEARNING_RATE,
-                "epochs": EPOCHS,
-                "batch_size": BATCH_SIZE,
-                "gradient_accumulation": GRAD_ACCUM,
-                "max_seq_length": MAX_SEQ_LENGTH,
+                "lora_r": training_cfg.lora_r,
+                "lora_alpha": training_cfg.lora_alpha,
+                "lora_dropout": training_cfg.lora_dropout,
+                "learning_rate": training_cfg.learning_rate,
+                "epochs": training_cfg.epochs,
+                "batch_size": training_cfg.batch_size,
+                "gradient_accumulation": training_cfg.grad_accum,
+                "max_seq_length": training_cfg.max_seq_length,
                 "train_examples": len(train_dataset),
                 "val_examples": len(val_dataset),
             }
@@ -346,16 +384,16 @@ def main() -> None:
         # Sauvegarde des hyperparamètres d'entraînement pour les rapports d'évaluation
         training_config = {
             "model_name": MODEL_NAME,
-            "lora_r": LORA_R,
-            "lora_alpha": LORA_ALPHA,
-            "lora_dropout": LORA_DROPOUT,
-            "lora_target_modules": LORA_TARGET_MODULES,
-            "learning_rate": LEARNING_RATE,
-            "epochs": EPOCHS,
-            "batch_size": BATCH_SIZE,
-            "grad_accum": GRAD_ACCUM,
-            "max_seq_length": MAX_SEQ_LENGTH,
-            "seed": SEED,
+            "lora_r": training_cfg.lora_r,
+            "lora_alpha": training_cfg.lora_alpha,
+            "lora_dropout": training_cfg.lora_dropout,
+            "lora_target_modules": training_cfg.lora_target_modules,
+            "learning_rate": training_cfg.learning_rate,
+            "epochs": training_cfg.epochs,
+            "batch_size": training_cfg.batch_size,
+            "grad_accum": training_cfg.grad_accum,
+            "max_seq_length": training_cfg.max_seq_length,
+            "seed": training_cfg.seed,
         }
         (CHECKPOINT_DIR / "training_config.json").write_text(
             json.dumps(training_config, indent=2), encoding="utf-8"
@@ -372,7 +410,7 @@ def main() -> None:
             artifact_path="adapter",
             task="text-generation",
             registered_model_name=REGISTERED_MODEL_NAME,
-            metadata={"base_model": MODEL_NAME, "lora_r": LORA_R, "stage": "sft"},
+            metadata={"base_model": MODEL_NAME, "lora_r": training_cfg.lora_r, "stage": "sft"},
             pip_requirements=["transformers", "torch", "peft", "accelerate"],
         )
 

@@ -9,9 +9,12 @@ Stratégie :
   C'est la référence correcte pour l'alignement DPO.
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import sys
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
@@ -39,6 +42,7 @@ import mlflow
 import mlflow.transformers
 from datasets import Dataset, DatasetDict, load_from_disk
 from dotenv import load_dotenv
+from loguru import Logger
 from peft import PeftModel
 from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import DPOConfig, DPOTrainer
@@ -54,27 +58,6 @@ SFT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "sft"
 DPO_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "dpo"
 
 DPO_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "dpo"
-
-MAX_SEQ_LENGTH = 1024
-BETA = 0.1  # pénalité KL — force de l'alignement
-LEARNING_RATE = 5e-5
-EPOCHS = 2
-# DPO charge chosen + rejected en parallèle → mémoire doublée → batch_size réduit
-BATCH_SIZE = 2
-GRAD_ACCUM = 8  # effective batch = 16, identique au SFT
-LORA_R = 32
-LORA_ALPHA = 64
-LORA_DROPOUT = 0.05
-LORA_TARGET_MODULES = [
-    "q_proj",
-    "v_proj",
-    "k_proj",
-    "o_proj",
-    "gate_proj",
-    "up_proj",
-    "down_proj",
-]
-SEED = 42
 
 MLFLOW_EXPERIMENT = "dpo-qwen3-1.7b-triage"
 MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
@@ -98,6 +81,75 @@ def load_training_config(config_path: Path) -> dict:
         sys.exit(1)
     with config_path.open() as f:
         return yaml.safe_load(f)
+
+
+# ── Config dataclass ───────────────────────────────────────────────────────────
+
+
+@dataclass
+class DPOTrainingConfig:
+    """Hyperparameters for DPO alignment, loaded from dpo.yaml.
+
+    Attributes:
+        max_seq_length: Maximum token sequence length.
+        beta: KL penalty coefficient (DPO paper default: 0.1).
+            Higher beta → more conservative updates, stays closer to SFT reference.
+        learning_rate: LoRA learning rate (lower than SFT to avoid reward hacking).
+        epochs: Number of training epochs.
+        batch_size: Per-device training batch size (DPO loads chosen + rejected in
+            parallel, so memory is doubled vs SFT → smaller batch).
+        grad_accum: Gradient accumulation steps (effective batch = batch_size * grad_accum).
+        seed: Global random seed for reproducibility.
+        lora_r: LoRA rank.
+        lora_alpha: LoRA scaling factor.
+        lora_dropout: LoRA dropout rate.
+        lora_target_modules: Module names to apply LoRA to.
+    """
+
+    max_seq_length: int
+    beta: float
+    learning_rate: float
+    epochs: int
+    batch_size: int
+    grad_accum: int
+    seed: int
+    lora_r: int
+    lora_alpha: int
+    lora_dropout: float
+    lora_target_modules: list[str]
+
+    @classmethod
+    def from_yaml(
+        cls,
+        cfg: dict,
+        beta_override: float | None = None,
+        epochs_override: int | None = None,
+    ) -> DPOTrainingConfig:
+        """Build from a parsed YAML config dict with optional CLI overrides.
+
+        Args:
+            cfg: Parsed YAML dict with top-level keys ``training`` and ``lora``.
+            beta_override: If provided, overrides ``training.beta`` from YAML.
+            epochs_override: If provided, overrides ``training.epochs`` from YAML.
+
+        Returns:
+            Populated ``DPOTrainingConfig`` instance.
+        """
+        t = cfg["training"]
+        lora = cfg["lora"]
+        return cls(
+            max_seq_length=t["max_seq_length"],
+            beta=beta_override if beta_override is not None else t["beta"],
+            learning_rate=t["learning_rate"],
+            epochs=epochs_override if epochs_override is not None else t["epochs"],
+            batch_size=t["batch_size"],
+            grad_accum=t["grad_accum"],
+            seed=t["seed"],
+            lora_r=lora["r"],
+            lora_alpha=lora["alpha"],
+            lora_dropout=lora["dropout"],
+            lora_target_modules=lora["target_modules"],
+        )
 
 
 # ── Batch transform functions ──────────────────────────────────────────────────
@@ -160,7 +212,7 @@ def _format_dpo_batch(
 def load_sft_merged_with_dpo_lora(
     model_name: str,
     sft_checkpoint: Path,
-    max_seq_length: int,
+    cfg: DPOTrainingConfig,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizerFast]:
     """Charge le modèle de base, fusionne le LoRA SFT, ajoute un LoRA DPO entraînable.
 
@@ -176,7 +228,7 @@ def load_sft_merged_with_dpo_lora(
     Args:
         model_name: Identifiant HuggingFace du modèle de base.
         sft_checkpoint: Répertoire du checkpoint LoRA SFT.
-        max_seq_length: Longueur max des séquences.
+        cfg: Configuration d'entraînement DPO (max_seq_length, paramètres LoRA...).
 
     Returns:
         Tuple (modèle avec LoRA DPO entraînable, tokenizer).
@@ -184,7 +236,7 @@ def load_sft_merged_with_dpo_lora(
     # Étape 1 : base model
     base_model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name,
-        max_seq_length=max_seq_length,
+        max_seq_length=cfg.max_seq_length,
         dtype=torch.bfloat16,
         load_in_4bit=False,
     )
@@ -198,13 +250,13 @@ def load_sft_merged_with_dpo_lora(
     # Étape 4 : ajouter un LoRA DPO frais et entraînable
     model = FastLanguageModel.get_peft_model(
         model,
-        r=LORA_R,
-        target_modules=LORA_TARGET_MODULES,
-        lora_alpha=LORA_ALPHA,
-        lora_dropout=LORA_DROPOUT,
+        r=cfg.lora_r,
+        target_modules=cfg.lora_target_modules,
+        lora_alpha=cfg.lora_alpha,
+        lora_dropout=cfg.lora_dropout,
         bias="none",
         use_gradient_checkpointing="unsloth",
-        random_state=SEED,
+        random_state=cfg.seed,
     )
 
     return model, tokenizer
@@ -235,31 +287,32 @@ def load_dpo_datasets(
     return train_dataset, val_dataset
 
 
-def build_dpo_config(output_dir: Path) -> DPOConfig:
+def build_dpo_config(output_dir: Path, cfg: DPOTrainingConfig) -> DPOConfig:
     """Construit la DPOConfig TRL.
 
     Args:
         output_dir: Répertoire de sortie pour les checkpoints.
+        cfg: Configuration d'entraînement DPO.
 
     Returns:
         Instance DPOConfig configurée pour l'entraînement DPO.
     """
     return DPOConfig(
         output_dir=str(output_dir),
-        num_train_epochs=EPOCHS,
-        per_device_train_batch_size=BATCH_SIZE,
-        per_device_eval_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=GRAD_ACCUM,
-        learning_rate=LEARNING_RATE,
+        num_train_epochs=cfg.epochs,
+        per_device_train_batch_size=cfg.batch_size,
+        per_device_eval_batch_size=cfg.batch_size,
+        gradient_accumulation_steps=cfg.grad_accum,
+        learning_rate=cfg.learning_rate,
         lr_scheduler_type="cosine",
         warmup_steps=10,
         weight_decay=0.01,
         bf16=True,
         fp16=False,
         gradient_checkpointing=True,
-        beta=BETA,
+        beta=cfg.beta,
         loss_type="sigmoid",  # DPO classique (Rafailov et al. 2023)  # type: ignore[reportArgumentType]
-        max_length=MAX_SEQ_LENGTH,
+        max_length=cfg.max_seq_length,
         # NOTE : max_prompt_length et max_completion_length ne sont pas supportés
         # par la version patchée de DPOConfig dans Unsloth (UnslothDPOTrainer.py).
         # La protection contre la troncature des réponses est assurée partiellement
@@ -275,11 +328,11 @@ def build_dpo_config(output_dir: Path) -> DPOConfig:
         greater_is_better=False,
         report_to="mlflow",
         run_name="dpo-qwen3-1.7b-triage",
-        seed=SEED,
+        seed=cfg.seed,
     )
 
 
-def log_model_info(model: PreTrainedModel, logger) -> None:
+def log_model_info(model: PreTrainedModel, logger: Logger) -> None:
     """Affiche le ratio de paramètres entraînables (LoRA DPO) vs total.
 
     Args:
@@ -314,33 +367,14 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=None, help="Override nombre d'epochs")
     args = parser.parse_args()
 
-    cfg = load_training_config(args.config)
-    t = cfg["training"]
-    lora = cfg["lora"]
-
-    global MAX_SEQ_LENGTH, BETA, LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES
-    global LEARNING_RATE, EPOCHS, BATCH_SIZE, GRAD_ACCUM, SEED
-
-    MAX_SEQ_LENGTH = t["max_seq_length"]
-    BETA = t["beta"]
-    LEARNING_RATE = t["learning_rate"]
-    EPOCHS = t["epochs"]
-    BATCH_SIZE = t["batch_size"]
-    GRAD_ACCUM = t["grad_accum"]
-    SEED = t["seed"]
-    LORA_R = lora["r"]
-    LORA_ALPHA = lora["alpha"]
-    LORA_DROPOUT = lora["dropout"]
-    LORA_TARGET_MODULES = lora["target_modules"]
-
-    # CLI overrides (optionnels — écrasent le YAML si fournis)
-    if args.beta is not None:
-        BETA = args.beta
-    if args.epochs is not None:
-        EPOCHS = args.epochs
+    training_cfg = DPOTrainingConfig.from_yaml(
+        load_training_config(args.config),
+        beta_override=args.beta,
+        epochs_override=args.epochs,
+    )
 
     logger = get_logger("20_train_dpo", verbose=args.verbose)
-    set_seed(SEED)
+    set_seed(training_cfg.seed)
 
     # Idempotence
     adapter_path = DPO_CHECKPOINT / "adapter_model.safetensors"
@@ -370,10 +404,10 @@ def main() -> None:
     # Le tokenizer est nécessaire pour formater les datasets via apply_chat_template.
     logger.info(
         "Chargement du modèle : base + SFT merged + DPO LoRA (r={}, beta={:.2f})...",
-        LORA_R,
-        BETA,
+        training_cfg.lora_r,
+        training_cfg.beta,
     )
-    model, tokenizer = load_sft_merged_with_dpo_lora(MODEL_NAME, SFT_CHECKPOINT, MAX_SEQ_LENGTH)
+    model, tokenizer = load_sft_merged_with_dpo_lora(MODEL_NAME, SFT_CHECKPOINT, training_cfg)
 
     # Chargement et formatage des datasets (nécessite le tokenizer pour apply_chat_template)
     logger.info("Chargement des datasets DPO...")
@@ -392,7 +426,7 @@ def main() -> None:
     # pour les métriques de steps (loss curves) au lieu de créer un nested run.
     with mlflow.start_run(run_name="dpo-qwen3-1.7b-triage"):
         # Configuration DPO
-        config = build_dpo_config(DPO_CHECKPOINT)
+        config = build_dpo_config(DPO_CHECKPOINT, training_cfg)
 
         # DPOTrainer
         # ref_model=None : TRL utilise le modèle SFT fusionné (sans adaptateur DPO) comme référence.
@@ -410,13 +444,13 @@ def main() -> None:
             {
                 "model_name": MODEL_NAME,
                 "sft_checkpoint": str(SFT_CHECKPOINT),
-                "beta": BETA,
-                "learning_rate": LEARNING_RATE,
-                "epochs": EPOCHS,
-                "batch_size": BATCH_SIZE,
-                "gradient_accumulation": GRAD_ACCUM,
-                "lora_r": LORA_R,
-                "lora_alpha": LORA_ALPHA,
+                "beta": training_cfg.beta,
+                "learning_rate": training_cfg.learning_rate,
+                "epochs": training_cfg.epochs,
+                "batch_size": training_cfg.batch_size,
+                "gradient_accumulation": training_cfg.grad_accum,
+                "lora_r": training_cfg.lora_r,
+                "lora_alpha": training_cfg.lora_alpha,
                 "train_pairs": len(train_dataset),
                 "val_pairs": len(val_dataset),
             }
@@ -448,7 +482,12 @@ def main() -> None:
             artifact_path="adapter",
             task="text-generation",
             registered_model_name=REGISTERED_MODEL_NAME,
-            metadata={"base_model": MODEL_NAME, "lora_r": LORA_R, "beta": BETA, "stage": "dpo"},
+            metadata={
+                "base_model": MODEL_NAME,
+                "lora_r": training_cfg.lora_r,
+                "beta": training_cfg.beta,
+                "stage": "dpo",
+            },
             pip_requirements=["transformers", "torch", "peft", "accelerate"],
         )
 
