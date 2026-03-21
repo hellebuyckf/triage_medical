@@ -10,13 +10,14 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from datasets import Dataset, DatasetDict, load_dataset
+from loguru import Logger
 from utils import get_logger, load_datasets_config
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "datasets.yaml"
 
 
-def download_dataset(name: str, config: dict, logger) -> DatasetDict | None:
+def download_dataset(name: str, config: dict, logger: Logger) -> DatasetDict | None:
     """Load a dataset from HuggingFace, using cache_dir for persistence.
 
     HuggingFace handles caching automatically: if the dataset is already
@@ -45,7 +46,7 @@ def download_dataset(name: str, config: dict, logger) -> DatasetDict | None:
     return result
 
 
-def print_stats(name: str, ds: DatasetDict, logger) -> None:
+def print_stats(name: str, ds: DatasetDict, logger: Logger) -> None:
     """Log splits, columns, and 2 random examples per split.
 
     Args:

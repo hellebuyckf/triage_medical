@@ -1,13 +1,23 @@
 training:
+  # Same max_seq_length as SFT — DPO sequences (prompt+chosen/rejected) fit within 1024.
   max_seq_length: 1024
+  # KL penalty coefficient. 0.1 is the DPO paper default; balances preference alignment
+  # vs. staying close to the SFT reference. Higher beta → more conservative updates.
   beta: 0.1
+  # 5e-5 is intentionally lower than SFT (2e-4): DPO is a fine adjustment on top of SFT,
+  # not a full fine-tuning. Too high a LR causes reward hacking.
   learning_rate: 0.00005
+  # 2 epochs on ~900 DPO pairs. More epochs increase reward hacking risk.
   epochs: 2
+  # Effective batch = batch_size * grad_accum = 2 * 8 = 16 (same as SFT).
+  # DPO processes pairs (chosen + rejected), so sequences are longer → smaller per-device batch.
   batch_size: 2
   grad_accum: 8
   seed: 42
 
 lora:
+  # Same LoRA config as SFT for consistency. The adapter is stacked on top of the SFT-merged
+  # model, so architectural parameters should not change between stages.
   r: 32
   alpha: 64
   dropout: 0.05

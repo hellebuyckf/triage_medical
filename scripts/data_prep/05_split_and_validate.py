@@ -12,6 +12,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from datasets import Dataset, DatasetDict
+from loguru import Logger
 from utils import DPO_COLUMNS, SFT_COLUMNS, get_logger, md5_hash
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -21,6 +22,14 @@ FINAL_DIR = PROJECT_ROOT / "data" / "final"
 SFT_INPUT = PROCESSED_DIR / "sft_anonymized"
 DPO_INPUT = PROCESSED_DIR / "dpo_anonymized"
 RGPD_REPORT_SRC = PROCESSED_DIR / "rgpd_report.md"
+
+# Maximum allowed gap (in %) between the most and least frequent urgency class.
+MAX_CLASS_IMBALANCE_PCT = 10.0
+
+# Minimum split sizes required to pass validation.
+MIN_SFT_TRAIN = 4000
+MIN_SFT_VAL = 500
+MIN_SFT_TEST = 500
 
 
 # ── Split ─────────────────────────────────────────────────────────────────────
@@ -87,7 +96,7 @@ def split_dpo(
 # ── Deduplication ─────────────────────────────────────────────────────────────
 
 
-def deduplicate(ds: Dataset, key_col: str, logger) -> Dataset:
+def deduplicate(ds: Dataset, key_col: str, logger: Logger) -> Dataset:
     """Remove duplicate rows post-anonymization using Arrow-native select.
 
     Only the hash column is loaded into Python memory, keeping RAM usage
@@ -122,7 +131,7 @@ def deduplicate(ds: Dataset, key_col: str, logger) -> Dataset:
 # ── Validation ────────────────────────────────────────────────────────────────
 
 
-def validate_schema(ds: Dataset, expected_columns: list[str], name: str, logger) -> bool:
+def validate_schema(ds: Dataset, expected_columns: list[str], name: str, logger: Logger) -> bool:
     """Check that all expected columns are present and contain no empty values.
 
     Args:
@@ -148,7 +157,7 @@ def validate_schema(ds: Dataset, expected_columns: list[str], name: str, logger)
     return True
 
 
-def validate_no_leakage(train_ds: Dataset, test_ds: Dataset, key_col: str, logger) -> bool:
+def validate_no_leakage(train_ds: Dataset, test_ds: Dataset, key_col: str, logger: Logger) -> bool:
     """Check there is no MD5-hash overlap between train and test on key_col.
 
     Args:
@@ -169,7 +178,7 @@ def validate_no_leakage(train_ds: Dataset, test_ds: Dataset, key_col: str, logge
     return True
 
 
-def validate_distribution(ds: Dataset, name: str, logger) -> bool:
+def validate_distribution(ds: Dataset, name: str, logger: Logger) -> bool:
     """Check that urgency_level distribution is balanced (gap < 10%).
 
     Args:
@@ -189,7 +198,7 @@ def validate_distribution(ds: Dataset, name: str, logger) -> bool:
     logger.info(f"[{name}] Urgency distribution: { {k: f'{v:.1f}%' for k, v in dist.items()} }")
 
     gap = max(dist.values()) - min(dist.values())
-    if gap > 10:
+    if gap > MAX_CLASS_IMBALANCE_PCT:
         logger.warning(f"[{name}] Imbalanced distribution: gap = {gap:.1f}%")
         return False
     return True
@@ -330,9 +339,15 @@ def main() -> None:
     sft_train, sft_val, sft_test = stratified_split_sft(ds_sft, seed=42)
 
     size_checks = [
-        (len(sft_train) >= 4000, f"SFT train: {len(sft_train)} examples (≥4000)"),
-        (len(sft_val) >= 500, f"SFT val: {len(sft_val)} examples (≥500)"),
-        (len(sft_test) >= 500, f"SFT test: {len(sft_test)} examples (≥500)"),
+        (
+            len(sft_train) >= MIN_SFT_TRAIN,
+            f"SFT train: {len(sft_train)} examples (≥{MIN_SFT_TRAIN})",
+        ),
+        (len(sft_val) >= MIN_SFT_VAL, f"SFT val: {len(sft_val)} examples (≥{MIN_SFT_VAL})"),
+        (
+            len(sft_test) >= MIN_SFT_TEST,
+            f"SFT test: {len(sft_test)} examples (≥{MIN_SFT_TEST})",
+        ),
     ]
     for ok, msg in size_checks:
         if ok:

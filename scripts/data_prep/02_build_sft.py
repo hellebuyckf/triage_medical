@@ -11,6 +11,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 import pandas as pd
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
+from loguru import Logger
 from utils import (
     SFT_COLUMNS,
     format_triage_response,
@@ -28,6 +29,13 @@ OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "sft_raw"
 # Number of CPU cores used by .map() / .filter().
 # Increase on multi-core machines for large datasets.
 NUM_PROC = 4
+
+# Batch size for the urgency inference pass.
+URGENCY_BATCH_SIZE = 1000
+
+# Target total examples before train/val/test split.
+# ~6 500 → ~5 200 train after dedup + balance, comfortable above the 4 000 threshold.
+SFT_TARGET_TOTAL = 6500
 
 # Sentinel dict returned by mappers for rows that fail validation.
 # Arrow requires a consistent schema, so we can't return None from .map().
@@ -257,7 +265,7 @@ SOURCES = {
 }
 
 
-def load_and_transform(name: str, ds_config: dict, transform_fn, logger) -> Dataset | None:
+def load_and_transform(name: str, ds_config: dict, transform_fn, logger: Logger) -> Dataset | None:
     """Load a raw dataset via HuggingFace cache and apply the source-specific transform.
 
     Uses ``load_dataset(cache_dir=...)`` so the HF cache is the single source
@@ -307,7 +315,7 @@ def load_and_transform(name: str, ds_config: dict, transform_fn, logger) -> Data
     return concatenate_datasets(splits) if len(splits) > 1 else splits[0]
 
 
-def deduplicate(ds: Dataset, logger) -> Dataset:
+def deduplicate(ds: Dataset, logger: Logger) -> Dataset:
     """Remove duplicate rows based on MD5 hash of the (instruction, response) pair.
 
     Hashing the full pair rather than instruction alone preserves legitimate
@@ -333,7 +341,7 @@ def deduplicate(ds: Dataset, logger) -> Dataset:
 
 
 def balance_classes(
-    df: pd.DataFrame, target_total: int = 5000, seed: int = 42, logger=None
+    df: pd.DataFrame, target_total: int = 5000, seed: int = 42, logger: Logger | None = None
 ) -> pd.DataFrame:
     """Undersample to balance urgency_level classes.
 
@@ -372,7 +380,7 @@ def balance_classes(
     return result
 
 
-def build_sft(datasets_config: dict, logger) -> pd.DataFrame:
+def build_sft(datasets_config: dict, logger: Logger) -> pd.DataFrame:
     """Full SFT dataset construction pipeline.
 
     Args:
@@ -407,7 +415,7 @@ def build_sft(datasets_config: dict, logger) -> pd.DataFrame:
     combined = combined.map(
         _infer_and_format_batch,
         batched=True,
-        batch_size=1000,
+        batch_size=URGENCY_BATCH_SIZE,
         remove_columns=["raw_response"],
         desc="urgency inference",
         num_proc=NUM_PROC,
@@ -419,7 +427,7 @@ def build_sft(datasets_config: dict, logger) -> pd.DataFrame:
     logger.info(f"Source distribution: {df['source'].value_counts().to_dict()}")
     logger.info(f"Language distribution: {df['language'].value_counts().to_dict()}")
 
-    return balance_classes(df, target_total=6500, seed=42, logger=logger)
+    return balance_classes(df, target_total=SFT_TARGET_TOTAL, seed=42, logger=logger)
 
 
 def main() -> None:

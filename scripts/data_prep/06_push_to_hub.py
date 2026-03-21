@@ -41,6 +41,7 @@ load_dotenv(dotenv_path=_PROJECT_ROOT / ".env", override=False)
 
 from datasets import Dataset, DatasetDict, load_from_disk
 from huggingface_hub import DatasetCard, DatasetCardData
+from loguru import Logger
 from utils import get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -133,7 +134,7 @@ def push_dataset(
     path: Path,
     repo_id: str,
     private: bool,
-    logger,
+    logger: Logger,
 ) -> bool:
     """Load a Dataset or DatasetDict from disk and push it to HuggingFace Hub.
 

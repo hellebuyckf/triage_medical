@@ -41,6 +41,15 @@ ENTITIES = [
     "NRP",
 ]
 
+# Presidio detections with score below this threshold are flagged for manual review.
+MIN_CONFIDENCE_REPORT = 0.7
+
+# Maximum number of PII examples shown in the RGPD report.
+MAX_PII_EXAMPLES = 10
+
+# Maximum number of low-confidence entries shown in the RGPD report.
+MAX_LOW_CONFIDENCE_REPORT = 20
+
 
 def load_presidio_engines() -> tuple[AnalyzerEngine, AnonymizerEngine]:
     """Initialise Presidio avec les modèles spaCy FR et EN."""
@@ -144,7 +153,7 @@ def anonymize_dataset(
             for ent in all_entities:
                 etype = ent["type"]
                 stats["entity_type_counts"][etype] = stats["entity_type_counts"].get(etype, 0) + 1
-                if ent["score"] < 0.7:
+                if ent["score"] < MIN_CONFIDENCE_REPORT:
                     stats["low_confidence_examples"].append(
                         {
                             "row_idx": idx,
@@ -154,7 +163,7 @@ def anonymize_dataset(
                         }
                     )
 
-            if len(stats["examples"]) < 10:
+            if len(stats["examples"]) < MAX_PII_EXAMPLES:
                 example: dict = {"entities": all_entities}
                 for col in columns:
                     example[f"original_{col}"] = str(row[col])
@@ -208,7 +217,7 @@ def generate_rgpd_report(sft_stats: dict, dpo_stats: dict) -> str:
 ## 3. Exemples de masquages (SFT)
 
 """
-    for i, ex in enumerate(sft_stats["examples"][:10], 1):
+    for i, ex in enumerate(sft_stats["examples"][:MAX_PII_EXAMPLES], 1):
         report += f"### Exemple {i}\n\n"
         report += f"**Instruction avant** : {ex.get('original_instruction', '')[:200]}...\n\n"
         report += f"**Instruction après** : {ex.get('anonymized_instruction', '')[:200]}...\n\n"
@@ -223,7 +232,7 @@ def generate_rgpd_report(sft_stats: dict, dpo_stats: dict) -> str:
 **{len(all_low)} détections à faible confiance** nécessitant relecture manuelle.
 
 """
-    for item in all_low[:20]:
+    for item in all_low[:MAX_LOW_CONFIDENCE_REPORT]:
         report += f'- Ligne {item["row_idx"]}: `{item["entity_type"]}` = "{item["text"]}" (score={item["score"]:.2f})\n'
 
     report += """

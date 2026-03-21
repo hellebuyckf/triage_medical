@@ -17,6 +17,12 @@ OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "dpo_raw"
 
 DPO_SOURCE = "ultramedical_preference"
 
+# Minimum number of words in chosen/rejected to pass quality filter.
+MIN_WORDS_QUALITY = 20
+
+# Target number of DPO pairs after undersampling.
+DPO_TARGET_PAIRS = 1000
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -52,9 +58,9 @@ def filter_dpo_quality(row: dict) -> bool:
 
     if not chosen_text or not rejected_text:
         return False
-    if len(chosen_text.split()) <= 20:
+    if len(chosen_text.split()) <= MIN_WORDS_QUALITY:
         return False
-    if len(rejected_text.split()) <= 20:
+    if len(rejected_text.split()) <= MIN_WORDS_QUALITY:
         return False
     if chosen_text == rejected_text:
         return False
@@ -156,7 +162,7 @@ def main() -> None:
     )
 
     # Stratified undersampling (human-annotated pairs prioritised)
-    ds_sampled = subsample_by_label_type(ds_filtered, target=1000, seed=42)
+    ds_sampled = subsample_by_label_type(ds_filtered, target=DPO_TARGET_PAIRS, seed=42)
     logger.info(f"After undersampling: {len(ds_sampled)} pairs.")
 
     # Transform to DPO schema — stays entirely in Arrow, no Python list or DataFrame
