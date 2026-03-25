@@ -174,6 +174,9 @@ def generate_responses_batch(
     for batch_start in tqdm(range(0, len(instructions), batch_size), desc="Generating"):
         batch = instructions[batch_start : batch_start + batch_size]
 
+        # Pre-fill the <think> block as empty to suppress Qwen3 chain-of-thought:
+        # the model would otherwise generate a variable-length <think>...</think>
+        # preamble that pushes the urgency label past the 150-char parsing window.
         prompts = [
             str(
                 tokenizer.apply_chat_template(  # type: ignore[union-attr]
@@ -185,6 +188,7 @@ def generate_responses_batch(
                     add_generation_prompt=True,
                 )
             )
+            + "<think>\n\n</think>\n"
             for instr in batch
         ]
 
@@ -487,49 +491,115 @@ def generate_dpo_eval_report(
     st = _fmt(sft_test_metrics)
     dt = _fmt(dpo_test_metrics)
 
-    val_note = (
-        ""
-        if (sft_val_metrics and dpo_val_metrics)
-        else ("\n\n*Non évalué (utiliser --eval-val pour générer).*")
+    has_val = sft_val_metrics is not None and dpo_val_metrics is not None
+
+    # Header
+    report = (
+        "# Rapport d'Évaluation DPO\n"
+        "## project14 — Agent de Triage Médical (Qwen3-1.7B + SFT + DPO)\n\n"
+        f"**Date** : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"**Modèle de base** : {MODEL_NAME}\n"
+        f"**Checkpoint SFT** : {SFT_CHECKPOINT}\n"
+        f"**Checkpoint DPO** : {DPO_CHECKPOINT}\n\n"
+        "---\n\n"
+        "## 1. Métriques comparées — Val Set\n\n"
     )
 
-    report = f"""# Rapport d'Évaluation DPO
-## project14 — Agent de Triage Médical (Qwen3-1.7B + SFT + DPO)
+    # Val set section — table only when both sets of metrics are available
+    if not has_val:
+        report += "*Non évalué (utiliser --eval-val pour générer).*\n"
+    else:
+        report += (
+            "| Métrique | SFT | DPO | Delta |\n"
+            "|---|---|---|---|\n"
+            "| Accuracy | "
+            + sv["accuracy"]
+            + " | "
+            + dv["accuracy"]
+            + " | "
+            + _delta(sft_val_metrics, dpo_val_metrics, "accuracy", pct=True)
+            + " |\n"
+            "| F1 Macro | "
+            + sv["f1_macro"]
+            + " | "
+            + dv["f1_macro"]
+            + " | "
+            + _delta(sft_val_metrics, dpo_val_metrics, "f1_macro")
+            + " |\n"
+            "| Recall Macro | "
+            + sv["recall_macro"]
+            + " | "
+            + dv["recall_macro"]
+            + " | "
+            + _delta(sft_val_metrics, dpo_val_metrics, "recall_macro")
+            + " |\n"
+            "| F2 Macro (\u03b2=2) | "
+            + sv["f2_macro"]
+            + " | "
+            + dv["f2_macro"]
+            + " | "
+            + _delta(sft_val_metrics, dpo_val_metrics, "f2_macro")
+            + " |\n"
+            "| Format Compliance | "
+            + sv["format_compliance"]
+            + " | "
+            + dv["format_compliance"]
+            + " | "
+            + _delta(sft_val_metrics, dpo_val_metrics, "format_compliance", pct=True)
+            + " |\n"
+            "| Non-parseables | " + sv["n_unparseable"] + " | " + dv["n_unparseable"] + " | — |\n"
+            "| Longueur réponse (mots) | "
+            + sv["response_length_mean"]
+            + " | "
+            + dv["response_length_mean"]
+            + " | "
+            + _delta(sft_val_metrics, dpo_val_metrics, "response_length_mean")
+            + " |\n"
+        )
 
-**Date** : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-**Modèle de base** : {MODEL_NAME}
-**Checkpoint SFT** : {SFT_CHECKPOINT}
-**Checkpoint DPO** : {DPO_CHECKPOINT}
-
----
-
-## 1. Métriques comparées — Val Set{val_note}
-
-| Métrique | SFT | DPO | Delta |
-|---|---|---|---|
-| Accuracy | {sv["accuracy"]} | {dv["accuracy"]} | {_delta(sft_val_metrics, dpo_val_metrics, "accuracy", pct=True)} |
-| F1 Macro | {sv["f1_macro"]} | {dv["f1_macro"]} | {_delta(sft_val_metrics, dpo_val_metrics, "f1_macro")} |
-| Recall Macro | {sv["recall_macro"]} | {dv["recall_macro"]} | {_delta(sft_val_metrics, dpo_val_metrics, "recall_macro")} |
-| F2 Macro (β=2) | {sv["f2_macro"]} | {dv["f2_macro"]} | {_delta(sft_val_metrics, dpo_val_metrics, "f2_macro")} |
-| Format Compliance | {sv["format_compliance"]} | {dv["format_compliance"]} | {_delta(sft_val_metrics, dpo_val_metrics, "format_compliance", pct=True)} |
-| Non-parseables | {sv["n_unparseable"]} | {dv["n_unparseable"]} | — |
-| Longueur réponse (mots) | {sv["response_length_mean"]} | {dv["response_length_mean"]} | {_delta(sft_val_metrics, dpo_val_metrics, "response_length_mean")} |
-
-## 2. Métriques comparées — Test Set
-
-| Métrique | SFT | DPO | Delta |
-|---|---|---|---|
-| Accuracy | {st["accuracy"]} | {dt["accuracy"]} | {_delta(sft_test_metrics, dpo_test_metrics, "accuracy", pct=True)} |
-| F1 Macro | {st["f1_macro"]} | {dt["f1_macro"]} | {_delta(sft_test_metrics, dpo_test_metrics, "f1_macro")} |
-| Recall Macro | {st["recall_macro"]} | {dt["recall_macro"]} | {_delta(sft_test_metrics, dpo_test_metrics, "recall_macro")} |
-| F2 Macro (β=2) | {st["f2_macro"]} | {dt["f2_macro"]} | {_delta(sft_test_metrics, dpo_test_metrics, "f2_macro")} |
-| Format Compliance | {st["format_compliance"]} | {dt["format_compliance"]} | {_delta(sft_test_metrics, dpo_test_metrics, "format_compliance", pct=True)} |
-
----
-
-## 3. Matrice de confusion DPO (Val Set)
-
-"""
+    # Test set section
+    report += (
+        "\n## 2. Métriques comparées — Test Set\n\n"
+        "| Métrique | SFT | DPO | Delta |\n"
+        "|---|---|---|---|\n"
+        "| Accuracy | "
+        + st["accuracy"]
+        + " | "
+        + dt["accuracy"]
+        + " | "
+        + _delta(sft_test_metrics, dpo_test_metrics, "accuracy", pct=True)
+        + " |\n"
+        "| F1 Macro | "
+        + st["f1_macro"]
+        + " | "
+        + dt["f1_macro"]
+        + " | "
+        + _delta(sft_test_metrics, dpo_test_metrics, "f1_macro")
+        + " |\n"
+        "| Recall Macro | "
+        + st["recall_macro"]
+        + " | "
+        + dt["recall_macro"]
+        + " | "
+        + _delta(sft_test_metrics, dpo_test_metrics, "recall_macro")
+        + " |\n"
+        "| F2 Macro (\u03b2=2) | "
+        + st["f2_macro"]
+        + " | "
+        + dt["f2_macro"]
+        + " | "
+        + _delta(sft_test_metrics, dpo_test_metrics, "f2_macro")
+        + " |\n"
+        "| Format Compliance | "
+        + st["format_compliance"]
+        + " | "
+        + dt["format_compliance"]
+        + " | "
+        + _delta(sft_test_metrics, dpo_test_metrics, "format_compliance", pct=True)
+        + " |\n\n"
+        "---\n\n"
+        "## 3. Matrice de confusion DPO (Val Set)\n\n"
+    )
     if dpo_val_metrics is None:
         report += "*Non évalué (utiliser --eval-val pour générer).*\n"
     else:

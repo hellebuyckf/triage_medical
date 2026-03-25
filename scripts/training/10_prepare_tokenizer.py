@@ -17,7 +17,7 @@ load_dotenv(dotenv_path=_SCRIPTS_DIR.parent / ".env", override=False)
 
 from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
-from utils import get_logger
+from utils import SYSTEM_PROMPT, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 
@@ -66,12 +66,16 @@ def _format_batch(
     completions: list[str] = []
     for instruction, response in zip(batch["instruction"], batch["response"], strict=True):
         prompt_text: str = tokenizer.apply_chat_template(  # type: ignore[assignment]
-            [{"role": "user", "content": str(instruction)}],
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": str(instruction)},
+            ],
             tokenize=False,
             add_generation_prompt=True,
         )
         full_text: str = tokenizer.apply_chat_template(  # type: ignore[assignment]
             [
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": str(instruction)},
                 {"role": "assistant", "content": str(response)},
             ],
@@ -110,6 +114,7 @@ def _compute_length_batch(
     for instruction, response in zip(batch["instruction"], batch["response"], strict=True):
         full_text: str = tokenizer.apply_chat_template(  # type: ignore[assignment]
             [
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": str(instruction)},
                 {"role": "assistant", "content": str(response)},
             ],

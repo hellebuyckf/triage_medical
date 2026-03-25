@@ -34,7 +34,7 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizerFast,
 )
-from utils import extract_urgency_from_response, get_logger
+from utils import SYSTEM_PROMPT, extract_urgency_from_response, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
@@ -180,15 +180,22 @@ def generate_responses_batch(
     for batch_start in tqdm(range(0, len(instructions), batch_size), desc="Generating"):
         batch = instructions[batch_start : batch_start + batch_size]
 
-        # apply_chat_template is the source of truth for special tokens
+        # apply_chat_template is the source of truth for special tokens.
+        # Pre-fill the <think> block as empty to suppress Qwen3 chain-of-thought:
+        # the model would otherwise generate a variable-length <think>...</think>
+        # preamble that pushes the urgency label past the 150-char parsing window.
         prompts = [
             str(
                 tokenizer.apply_chat_template(  # type: ignore[union-attr]
-                    [{"role": "user", "content": instr}],
+                    [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": instr},
+                    ],
                     tokenize=False,
                     add_generation_prompt=True,
                 )
             )
+            + "<think>\n\n</think>\n"
             for instr in batch
         ]
 
@@ -488,47 +495,51 @@ def generate_eval_report(
     if isinstance(target_modules, list):
         target_modules = ", ".join(target_modules)
 
-    report = f"""# Rapport d'Évaluation SFT
-## project14 — Agent de Triage Médical (Qwen3-1.7B + LoRA)
+    # Build the metrics table separately to avoid f-string interpolation issues
+    # inside a large triple-quoted block (e.g. emoji in SYSTEM_PROMPT scope).
+    metrics_table = (
+        "| Métrique | Val Set | Test Set |\n"
+        "|---|---|---|\n"
+        "| Accuracy | " + str(v["accuracy"]) + " | " + str(t["accuracy"]) + " |\n"
+        "| F1 Macro | " + str(v["f1_macro"]) + " | " + str(t["f1_macro"]) + " |\n"
+        "| Recall Macro | " + str(v["recall_macro"]) + " | " + str(t["recall_macro"]) + " |\n"
+        "| F2 Macro (\u03b2=2) | " + str(v["f2_macro"]) + " | " + str(t["f2_macro"]) + " |\n"
+        "| Format Compliance | "
+        + str(v["format_compliance"])
+        + " | "
+        + str(t["format_compliance"])
+        + " |\n"
+        "| Longueur moyenne réponse | "
+        + str(v["response_length_mean"])
+        + " | "
+        + str(t["response_length_mean"])
+        + " |\n"
+        "| Non-parseables | " + str(v["n_unparseable"]) + " | " + str(t["n_unparseable"]) + " |"
+    )
 
-**Date** : {date_str}
-**Modèle** : {training_config.get("model_name", MODEL_NAME)}
-**Checkpoint** : {CHECKPOINT_DIR}
-
-### Hyperparamètres d'entraînement
-
-| Paramètre | Valeur |
-|---|---|
-| LoRA r | {training_config["lora_r"]} |
-| LoRA alpha | {training_config["lora_alpha"]} |
-| LoRA dropout | {training_config["lora_dropout"]} |
-| LoRA target modules | {target_modules} |
-| Learning rate | {training_config["learning_rate"]} |
-| Epochs | {training_config["epochs"]} |
-| Batch size | {training_config["batch_size"]} |
-| Gradient accumulation | {training_config["grad_accum"]} |
-| Max seq length | {training_config["max_seq_length"]} |
-| Seed | {training_config["seed"]} |
-
----
-
-## 1. Métriques
-
-| Métrique | Val Set | Test Set |
-|---|---|---|
-| Accuracy | {v["accuracy"]} | {t["accuracy"]} |
-| F1 Macro | {v["f1_macro"]} | {t["f1_macro"]} |
-| Recall Macro | {v["recall_macro"]} | {t["recall_macro"]} |
-| F2 Macro (β=2) | {v["f2_macro"]} | {t["f2_macro"]} |
-| Format Compliance | {v["format_compliance"]} | {t["format_compliance"]} |
-| Longueur moyenne réponse | {v["response_length_mean"]} | {t["response_length_mean"]} |
-| Non-parseables | {v["n_unparseable"]} | {t["n_unparseable"]} |
-
----
-
-## 2. Matrice de confusion (Val Set)
-
-"""
+    report = (
+        "# Rapport d'Évaluation SFT\n"
+        "## project14 — Agent de Triage Médical (Qwen3-1.7B + LoRA)\n\n"
+        f"**Date** : {date_str}\n"
+        f"**Modèle** : {training_config.get('model_name', MODEL_NAME)}\n"
+        f"**Checkpoint** : {CHECKPOINT_DIR}\n\n"
+        "### Hyperparamètres d'entraînement\n\n"
+        "| Paramètre | Valeur |\n"
+        "|---|---|\n"
+        f"| LoRA r | {training_config['lora_r']} |\n"
+        f"| LoRA alpha | {training_config['lora_alpha']} |\n"
+        f"| LoRA dropout | {training_config['lora_dropout']} |\n"
+        f"| LoRA target modules | {target_modules} |\n"
+        f"| Learning rate | {training_config['learning_rate']} |\n"
+        f"| Epochs | {training_config['epochs']} |\n"
+        f"| Batch size | {training_config['batch_size']} |\n"
+        f"| Gradient accumulation | {training_config['grad_accum']} |\n"
+        f"| Max seq length | {training_config['max_seq_length']} |\n"
+        f"| Seed | {training_config['seed']} |\n\n"
+        "---\n\n"
+        "## 1. Métriques\n\n" + metrics_table + "\n\n---\n\n"
+        "## 2. Matrice de confusion (Val Set)\n\n"
+    )
     if val_metrics is None:
         report += "*Non évalué (utiliser --eval-val pour générer).*\n"
     else:
