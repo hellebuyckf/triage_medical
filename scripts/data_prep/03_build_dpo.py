@@ -1,4 +1,23 @@
-"""Script 03 — Build the DPO dataset (~1,000 prompt/chosen/rejected pairs)."""
+"""Script 03 — Build the DPO dataset (~1,000 synthetic prompt/chosen/rejected pairs).
+
+Strategy: synthetic pairs from the SFT train split.
+  - chosen  : the correct triage response (ground-truth urgency label).
+  - rejected : same clinical body, reformatted with a plausible wrong urgency label.
+
+This approach ensures DPO directly corrects the SFT model's urgency-classification
+errors instead of learning stylistic preferences from misaligned academic text
+(UltraMedical-Preference was abandoned — see memory/project_dpo_strategy.md).
+
+Urgency swap table (safety-first: rejected = most dangerous downgrade):
+  max      → deferred   (most dangerous error: critical case sent home)
+  moderate → deferred   (common over-reassurance error)
+  deferred → moderate   (most common SFT mistake for deferred)
+
+Note: "maximale" never appears in rejected, consistent with a safety-first policy
+(we never want the model to learn that predicting max is wrong). "différée" appears
+heavily in rejected (~600/900 pairs), correcting the DPO v1 structural bug where
+"différée" was never rejected and became an over-predicted safe default.
+"""
 
 import argparse
 import sys
@@ -8,173 +27,163 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from datasets import Dataset, concatenate_datasets, load_dataset
-from utils import DPO_COLUMNS, get_logger, load_datasets_config
+from datasets import Dataset, concatenate_datasets, load_from_disk
+from utils import DPO_COLUMNS, format_triage_response, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
-DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "datasets.yaml"
+# sft_raw is produced by 02_build_sft.py and available before this script runs.
+# data/final/sft is produced by 05_split_and_validate.py (downstream) — do not use here.
+SFT_RAW_DIR = PROJECT_ROOT / "data" / "processed" / "sft_raw"
 OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "dpo_raw"
 
-DPO_SOURCE = "ultramedical_preference"
+DPO_SOURCE = "sft_synthetic"
+SEED = 42
 
-# Minimum number of words in chosen/rejected to pass quality filter.
-MIN_WORDS_QUALITY = 20
-
-# Target number of DPO pairs after undersampling.
+# Target number of DPO pairs after stratified undersampling.
 DPO_TARGET_PAIRS = 1000
+
+# Rejected urgency level for each correct level (safety-first policy).
+# Each label appears in rejected ~equally often; "différée" is heavily penalised
+# to prevent the model from using it as a safe default (v1 structural bug fix).
+_URGENCY_SWAP: dict[str, str] = {
+    "max": "deferred",
+    "moderate": "deferred",
+    "deferred": "moderate",
+}
+
+# Markers used to extract the clinical body from a formatted triage response.
+_EVAL_MARKER = "Évaluation clinique : "
+_RECO_MARKER = "\n\nRecommandations : "
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def extract_assistant_text(messages: list[dict]) -> str:
-    """Extract the assistant turn text from a list of {content, role} messages.
+def extract_clinical_body(response: str) -> str:
+    """Extract the clinical evaluation body from a formatted triage response.
+
+    The expected format is:
+        URGENCE <LEVEL>
+
+        Évaluation clinique : <body>
+
+        Recommandations : <reco>
 
     Args:
-        messages: List of message dicts with ``role`` and ``content`` keys.
+        response: Full formatted triage response string.
 
     Returns:
-        Content of the first assistant message, or empty string if not found.
+        Clinical evaluation body, or the full response if markers are absent.
     """
-    for msg in messages:
-        if msg.get("role") == "assistant":
-            return msg.get("content", "").strip()
-    return ""
+    start = response.find(_EVAL_MARKER)
+    if start == -1:
+        return response
+    start += len(_EVAL_MARKER)
+    end = response.find(_RECO_MARKER, start)
+    if end == -1:
+        return response[start:]
+    return response[start:end]
 
 
-def filter_dpo_quality(row: dict) -> bool:
-    """Check quality criteria for a DPO pair.
+def build_synthetic_pair(row: dict) -> dict:
+    """Build one DPO pair from an SFT row.
 
-    chosen/rejected are lists of {content, role} message dicts.
+    chosen  = original response (correct urgency label).
+    rejected = same clinical body reformatted with the swapped urgency label.
 
     Args:
-        row: Raw dataset row with ``chosen`` and ``rejected`` columns.
+        row: SFT raw dataset row with keys instruction, response, urgency_level
+             (string: "max" / "moderate" / "deferred"), source, language.
 
     Returns:
-        ``True`` if the pair meets all quality thresholds.
+        Dict with keys prompt, chosen, rejected, source, language.
     """
-    chosen_text = extract_assistant_text(row.get("chosen", []))
-    rejected_text = extract_assistant_text(row.get("rejected", []))
+    urgency_level: str = row["urgency_level"]
+    wrong_level = _URGENCY_SWAP[urgency_level]
+    clinical_body = extract_clinical_body(row["response"])
 
-    if not chosen_text or not rejected_text:
-        return False
-    if len(chosen_text.split()) <= MIN_WORDS_QUALITY:
-        return False
-    if len(rejected_text.split()) <= MIN_WORDS_QUALITY:
-        return False
-    if chosen_text == rejected_text:
-        return False
-    return True
+    return {
+        "prompt": row["instruction"],
+        "chosen": row["response"],
+        "rejected": format_triage_response(wrong_level, clinical_body),
+        "source": DPO_SOURCE,
+        "language": row["language"],
+    }
 
 
-def subsample_by_label_type(ds: Dataset, target: int = 1000, seed: int = 42) -> Dataset:
-    """Undersample while prioritising human-annotated pairs.
+def stratified_subsample(ds: Dataset, target: int, seed: int = SEED) -> Dataset:
+    """Undersample while keeping urgency classes balanced.
+
+    Splits the dataset by urgency_level, takes an equal share from each class,
+    concatenates, and shuffles.
 
     Args:
-        ds: Filtered dataset with a ``label_type`` column.
+        ds: Dataset with an ``urgency_level`` column (ClassLabel integers).
         target: Desired total number of pairs.
         seed: Random seed for reproducibility.
 
     Returns:
         Shuffled dataset of at most ``target`` pairs.
     """
-    ds_human = ds.filter(lambda x: x.get("label_type") == "human", desc="filter human")
-    ds_model = ds.filter(lambda x: x.get("label_type") != "human", desc="filter model")
+    labels = sorted(set(ds["urgency_level"]))  # strings: "deferred", "max", "moderate"
+    per_class = target // len(labels)
+    splits: list[Dataset] = []
 
-    n_human = len(ds_human)
-    n_model_needed = max(0, target - n_human)
+    for label in labels:
+        subset = ds.filter(lambda x, lbl=label: x["urgency_level"] == lbl)
+        n = min(per_class, len(subset))
+        splits.append(subset.shuffle(seed=seed).select(range(n)))
 
-    if n_model_needed > 0 and len(ds_model) > 0:
-        ds_model = ds_model.shuffle(seed=seed).select(range(min(n_model_needed, len(ds_model))))
-        result = concatenate_datasets([ds_human, ds_model])
-    else:
-        result = ds_human.select(range(min(target, n_human)))
-
-    return result.shuffle(seed=seed)
-
-
-def transform_ultramedical(row: dict) -> dict:
-    """Transform one UltraMedical-Preference row to the DPO schema.
-
-    Extracts assistant text from the chosen/rejected message lists and
-    flattens them into plain strings.
-
-    Args:
-        row: Raw dataset row with ``prompt``, ``chosen``, and ``rejected`` columns.
-
-    Returns:
-        DPO dict with keys: prompt, chosen, rejected, source, language.
-    """
-    return {
-        "prompt": row["prompt"],
-        "chosen": extract_assistant_text(row["chosen"]),
-        "rejected": extract_assistant_text(row["rejected"]),
-        "source": DPO_SOURCE,
-        "language": "en",
-    }
+    return concatenate_datasets(splits).shuffle(seed=seed)
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build DPO dataset")
+    """Build synthetic DPO pairs from the SFT train split and save to disk."""
+    parser = argparse.ArgumentParser(description="Build synthetic DPO dataset from SFT train split")
     parser.add_argument("--verbose", action="store_true", help="Enable DEBUG logging")
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=DEFAULT_CONFIG,
-        help=f"Path to datasets YAML config (default: {DEFAULT_CONFIG})",
-    )
     args = parser.parse_args()
 
     logger = get_logger("03_build_dpo", verbose=args.verbose)
 
     if OUTPUT_PATH.exists():
-        logger.info(f"DPO dataset already built at {OUTPUT_PATH}, skipping.")
+        logger.info("DPO dataset already built at {}, skipping.", OUTPUT_PATH)
         ds = Dataset.load_from_disk(str(OUTPUT_PATH))
-        logger.info(f"  {len(ds)} pairs.")
+        logger.info("  {} pairs.", len(ds))
         return
 
-    datasets_config = load_datasets_config(args.config, PROJECT_ROOT)
-    if DPO_SOURCE not in datasets_config:
-        logger.error(f"'{DPO_SOURCE}' not found in config {args.config}. Run 01_download.py first.")
+    if not SFT_RAW_DIR.exists():
+        logger.error("SFT raw dataset not found at {}. Run 02_build_sft.py first.", SFT_RAW_DIR)
         return
 
-    ds_config = datasets_config[DPO_SOURCE]
-    logger.info(f"Loading {DPO_SOURCE} from HF cache ({ds_config['cache_dir']})...")
-    raw = load_dataset(
-        ds_config["hf_id"],
-        cache_dir=str(ds_config["cache_dir"]),
-    )
+    logger.info("Loading SFT raw dataset from {}...", SFT_RAW_DIR)
+    ds_train = load_from_disk(str(SFT_RAW_DIR))
+    logger.info("SFT raw: {} examples.", len(ds_train))
 
-    # Use the first available split (train expected)
-    split_name = list(raw.keys())[0]
-    ds_split = raw[split_name]
-    logger.info(f"Split '{split_name}': {len(ds_split)} raw pairs.")
+    # Stratified undersampling before transform (cheaper on raw SFT rows).
+    logger.info("Stratified undersampling to {} pairs...", DPO_TARGET_PAIRS)
+    ds_sampled = stratified_subsample(ds_train, target=DPO_TARGET_PAIRS, seed=SEED)
+    logger.info("After undersampling: {} pairs.", len(ds_sampled))
 
-    # Quality filtering
-    initial_count = len(ds_split)
-    ds_filtered = ds_split.filter(filter_dpo_quality, desc="DPO quality filter")
-    logger.info(
-        f"Quality filter: {initial_count - len(ds_filtered)} pairs rejected, "
-        f"{len(ds_filtered)} kept."
-    )
-
-    # Stratified undersampling (human-annotated pairs prioritised)
-    ds_sampled = subsample_by_label_type(ds_filtered, target=DPO_TARGET_PAIRS, seed=42)
-    logger.info(f"After undersampling: {len(ds_sampled)} pairs.")
-
-    # Transform to DPO schema — stays entirely in Arrow, no Python list or DataFrame
+    # Build synthetic pairs.
     ds_dpo = ds_sampled.map(
-        transform_ultramedical,
+        build_synthetic_pair,
         remove_columns=ds_sampled.column_names,
-        desc="DPO transform",
+        desc="Building synthetic DPO pairs",
     ).select_columns(DPO_COLUMNS)
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     ds_dpo.save_to_disk(str(OUTPUT_PATH))
-    logger.info(f"DPO dataset: {len(ds_dpo)} pairs saved to {OUTPUT_PATH}.")
+    logger.info("DPO dataset: {} pairs saved to {}.", len(ds_dpo), OUTPUT_PATH)
+
+    # Log urgency distribution for sanity check.
+    prompts_sample = ds_dpo.select(range(min(10, len(ds_dpo))))
+    logger.info("Sample chosen responses (first 80 chars):")
+    for row in prompts_sample:
+        logger.info("  chosen : {}", row["chosen"][:80].replace("\n", " "))
+        logger.info("  rejected: {}", row["rejected"][:80].replace("\n", " "))
 
 
 if __name__ == "__main__":

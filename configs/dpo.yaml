@@ -1,18 +1,18 @@
 training:
   # Same max_seq_length as SFT — DPO sequences (prompt+chosen/rejected) fit within 1024.
   max_seq_length: 1024
-  # KL penalty coefficient. 0.1 is the DPO paper default; balances preference alignment
-  # vs. staying close to the SFT reference. Higher beta → more conservative updates.
-  beta: 0.1
-  # 5e-5 is intentionally lower than SFT (2e-4): DPO is a fine adjustment on top of SFT,
-  # not a full fine-tuning. Too high a LR causes reward hacking.
-  learning_rate: 0.00005
-  # 2 epochs on ~900 DPO pairs. More epochs increase reward hacking risk.
-  epochs: 2
-  # Effective batch = batch_size * grad_accum = 2 * 8 = 16 (same as SFT).
-  # DPO processes pairs (chosen + rejected), so sequences are longer → smaller per-device batch.
-  batch_size: 2
-  grad_accum: 8
+  # KL penalty coefficient. 0.5 chosen after mode collapse observed at beta=0.1 (Run B):
+  # model collapsed to predicting "deferred" for ~95% of examples (-25.5% accuracy vs SFT).
+  # Stronger KL constraint keeps DPO closer to the SFT reference and prevents reward hacking.
+  beta: 0.5
+  # Reduced from 5e-5 after reward hacking at higher LR — conservative adjustment on SFT base.
+  learning_rate: 0.00002
+  # Reduced from 2 — fewer epochs limit drift from SFT reference on small dataset (~900 pairs).
+  epochs: 1
+  # Effective batch = batch_size * grad_accum = 1 * 16 = 16 (same as SFT).
+  # batch_size=1 after OOM at step 46/57 with new DPO pairs (longer sequences).
+  batch_size: 1
+  grad_accum: 16
   seed: 42
 
 lora:
