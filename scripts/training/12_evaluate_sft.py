@@ -57,6 +57,15 @@ MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
 
 URGENCY_LABELS = ["max", "moderate", "deferred"]
 
+# Seuils d'acceptation cliniques — calibrés POC (données de qualité moyenne, modèle 1.7B).
+# Voir specs/EVAL-Metrics-Cliniques.md pour la justification complète.
+CLINICAL_THRESHOLDS: dict[str, float] = {
+    "recall_max": 0.75,  # Rappel classe "max" : rater une urgence critique est inacceptable
+    "f2_macro": 0.60,  # F2 (β=2) pénalise les faux négatifs
+    "format_compliance": 0.70,  # Réponses au format parseable par le workflow clinique
+    "accuracy": 0.60,  # Accuracy globale minimale
+}
+
 
 # ── Fonctions ─────────────────────────────────────────────────────────────────
 
@@ -341,6 +350,15 @@ def evaluate_split(
                 labels=URGENCY_LABELS,
                 zero_division=0,  # type: ignore[reportArgumentType]
             )
+            # Recall par classe — index 0 = "max" (urgence critique, métrique clinique clé)
+            recall_per_class = recall_score(
+                y_true,
+                y_pred,
+                average=None,
+                labels=URGENCY_LABELS,
+                zero_division=0,  # type: ignore[reportArgumentType]
+            )
+            recall_max = float(recall_per_class[0])
             f2_macro = fbeta_score(
                 y_true,
                 y_pred,
@@ -354,6 +372,7 @@ def evaluate_split(
             accuracy = 0.0
             f1_macro = 0.0
             recall_macro = 0.0
+            recall_max = 0.0
             f2_macro = 0.0
             cm = None
 
@@ -367,6 +386,7 @@ def evaluate_split(
             "accuracy": round(accuracy, 4),
             "f1_macro": round(f1_macro, 4),
             "recall_macro": round(recall_macro, 4),
+            "recall_max": round(recall_max, 4),
             "f2_macro": round(f2_macro, 4),
             "format_compliance": round(format_compliance, 4),
             "response_length_mean": round(response_length_mean, 1),
@@ -436,6 +456,62 @@ def sample_good_bad_examples(
     return good_sample, bad_sample
 
 
+def check_clinical_thresholds(
+    metrics: dict,
+    thresholds: dict[str, float] = CLINICAL_THRESHOLDS,
+) -> list[dict]:
+    """Vérifie les métriques cliniques par rapport aux seuils d'acceptation POC.
+
+    Args:
+        metrics: Dict de métriques issu de evaluate_split.
+        thresholds: Dict {nom_metrique: seuil_minimal}. Défaut : CLINICAL_THRESHOLDS.
+
+    Returns:
+        Liste de dicts {criterion, value, threshold, passed}.
+    """
+    return [
+        {
+            "criterion": criterion,
+            "value": float(metrics.get(criterion, 0.0)),
+            "threshold": threshold,
+            "passed": float(metrics.get(criterion, 0.0)) >= threshold,
+        }
+        for criterion, threshold in thresholds.items()
+    ]
+
+
+def _format_clinical_table(threshold_results: list[dict]) -> str:
+    """Génère le tableau Markdown des critères cliniques avec statut PASS/FAIL.
+
+    Args:
+        threshold_results: Sortie de check_clinical_thresholds.
+
+    Returns:
+        Tableau Markdown formaté.
+    """
+    _labels = {
+        "recall_max": "Recall URGENCE MAX",
+        "f2_macro": "F2 Macro (β=2)",
+        "format_compliance": "Format Compliance",
+        "accuracy": "Accuracy globale",
+    }
+    _pct_keys = {"recall_max", "format_compliance", "accuracy"}
+    lines = [
+        "| Critère | Valeur | Seuil (POC) | Statut |",
+        "|---|---|---|---|",
+    ]
+    for r in threshold_results:
+        name = _labels.get(r["criterion"], r["criterion"])
+        v, t = r["value"], r["threshold"]
+        if r["criterion"] in _pct_keys:
+            val_str, thr_str = f"{v:.1%}", f"≥ {t:.0%}"
+        else:
+            val_str, thr_str = f"{v:.4f}", f"≥ {t:.2f}"
+        status = "✅ PASS" if r["passed"] else "❌ FAIL"
+        lines.append(f"| {name} | {val_str} | {thr_str} | {status} |")
+    return "\n".join(lines)
+
+
 def generate_eval_report(
     val_metrics: dict | None,
     test_metrics: dict,
@@ -471,6 +547,7 @@ def generate_eval_report(
                     "accuracy",
                     "f1_macro",
                     "recall_macro",
+                    "recall_max",
                     "f2_macro",
                     "format_compliance",
                     "response_length_mean",
@@ -481,6 +558,7 @@ def generate_eval_report(
             "accuracy": f"{m['accuracy']:.2%}",
             "f1_macro": f"{m['f1_macro']:.4f}",
             "recall_macro": f"{m['recall_macro']:.4f}",
+            "recall_max": f"{m['recall_max']:.2%}",
             "f2_macro": f"{m['f2_macro']:.4f}",
             "format_compliance": f"{m['format_compliance']:.1%}",
             "response_length_mean": f"{m['response_length_mean']:.0f} mots",
@@ -503,6 +581,7 @@ def generate_eval_report(
         "| Accuracy | " + str(v["accuracy"]) + " | " + str(t["accuracy"]) + " |\n"
         "| F1 Macro | " + str(v["f1_macro"]) + " | " + str(t["f1_macro"]) + " |\n"
         "| Recall Macro | " + str(v["recall_macro"]) + " | " + str(t["recall_macro"]) + " |\n"
+        "| **Recall URGENCE MAX** | " + str(v["recall_max"]) + " | " + str(t["recall_max"]) + " |\n"
         "| F2 Macro (\u03b2=2) | " + str(v["f2_macro"]) + " | " + str(t["f2_macro"]) + " |\n"
         "| Format Compliance | "
         + str(v["format_compliance"])
@@ -593,6 +672,23 @@ def generate_eval_report(
             f"**Accuracy ({acc:.1%}) < 60%** : Insuffisant. "
             "Revoir le dataset (distribution, qualité des réponses) ou l'architecture (r, target_modules).\n"
         )
+
+    # Critères cliniques — seuils POC (données de qualité moyenne, modèle 1.7B)
+    clinical_results = check_clinical_thresholds(test_metrics)
+    n_pass = sum(1 for r in clinical_results if r["passed"])
+    n_total_criteria = len(clinical_results)
+    report += (
+        "\n---\n\n## 7. Critères cliniques — Seuils d'acceptation POC\n\n"
+        "> Seuils calibrés pour un POC sur données de qualité moyenne (modèle 1.7B, labels inférés).\n"
+        "> Voir `specs/EVAL-Metrics-Cliniques.md` pour la justification complète.\n\n"
+        + _format_clinical_table(clinical_results)
+        + f"\n\n**Résultat : {n_pass}/{n_total_criteria} critères atteints**"
+        + (
+            " — modèle validé pour ce POC.\n"
+            if n_pass == n_total_criteria
+            else " — voir critères FAIL ci-dessus.\n"
+        )
+    )
 
     return report
 
@@ -728,6 +824,7 @@ def main() -> None:
             "test_accuracy": test_metrics["accuracy"],
             "test_f1_macro": test_metrics["f1_macro"],
             "test_recall_macro": test_metrics["recall_macro"],
+            "test_recall_max": test_metrics["recall_max"],
             "test_f2_macro": test_metrics["f2_macro"],
             "test_format_compliance": test_metrics["format_compliance"],
         }
@@ -737,6 +834,7 @@ def main() -> None:
                     "val_accuracy": val_metrics["accuracy"],
                     "val_f1_macro": val_metrics["f1_macro"],
                     "val_recall_macro": val_metrics["recall_macro"],
+                    "val_recall_max": val_metrics["recall_max"],
                     "val_f2_macro": val_metrics["f2_macro"],
                     "val_format_compliance": val_metrics["format_compliance"],
                     "val_n_unparseable": val_metrics["n_unparseable"],
