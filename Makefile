@@ -1,6 +1,7 @@
 .PHONY: all setup lint download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
-        dpo-pipeline train-dpo evaluate-dpo export-model push-model \
+        sft-errors rebuild-dpo \
+        dpo-pipeline dpo-pipeline-hard train-dpo evaluate-dpo export-model push-model \
         push-datasets push-datasets-all \
         mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow \
         clean clean-sft clean-dpo clean-all retrain help
@@ -81,6 +82,22 @@ evaluate-sft: train-sft
 	$(PYTHON) $(TRAINING)/12_evaluate_sft.py $(_EVAL_VAL_FLAG)
 
 # ── DPO ───────────────────────────────────────────────────────────────────────
+
+# Generate hard-negative DPO pairs from SFT misclassifications.
+# Requires: checkpoints/sft (run sft-pipeline first).
+sft-errors: train-sft
+	$(PYTHON) $(DATA_PREP)/03b_sft_errors.py
+
+# Rebuild the DPO raw dataset (picks up hard negatives if present) and
+# re-run anonymize + split to propagate changes to data/final/dpo.
+rebuild-dpo: sft-errors
+	rm -rf data/processed/dpo_raw data/processed/sft_anonymized data/processed/dpo_anonymized data/final/dpo
+	$(PYTHON) $(DATA_PREP)/03_build_dpo.py
+	$(PYTHON) $(DATA_PREP)/04_anonymize.py
+	$(PYTHON) $(DATA_PREP)/05_split_and_validate.py
+
+# Full DPO pipeline with hard negatives: generate errors → rebuild data → train → eval → export.
+dpo-pipeline-hard: rebuild-dpo clean-dpo dpo-pipeline
 
 dpo-pipeline: train-dpo evaluate-dpo export-model
 

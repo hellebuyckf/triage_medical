@@ -69,3 +69,8 @@ known-first-party = ["scripts"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+]
