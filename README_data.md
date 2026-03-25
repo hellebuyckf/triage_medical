@@ -18,16 +18,17 @@ data/
 │
 ├── processed/                        # HF Arrow (générés par 02–04)
 │   ├── sft_raw/                      #   Dataset  — 6 498 lignes
-│   ├── dpo_raw/                      #   Dataset  — 1 000 lignes
+│   ├── dpo_raw/                      #   Dataset  — ~2 154 lignes (480 synthetic + 1 674 hard neg)
+│   ├── dpo_hard_negatives/           #   Dataset  — 1 674 lignes (généré par 03b, requiert SFT)
 │   ├── sft_anonymized/               #   Dataset  — 6 498 lignes
-│   ├── dpo_anonymized/               #   Dataset  — 1 000 lignes
+│   ├── dpo_anonymized/               #   Dataset  — ~2 154 lignes
 │   ├── sft_tokenized/                #   Dataset  — formaté prompt/completion (généré par 10)
 │   └── rgpd_report.md
 │
 └── final/                            # HF Arrow — DatasetDict (générés par 05)
-    ├── sft/                          #   DatasetDict {train: 4 957, val: 620, test: 620}
+    ├── sft/                          #   DatasetDict {train: 4 544, val: 568, test: 569}
     │   └── dataset_dict.json
-    ├── dpo/                          #   DatasetDict {train: 900, val: 100}
+    ├── dpo/                          #   DatasetDict {train: ~1 938, val: ~216}
     │   └── dataset_dict.json
     ├── stats_report.md
     └── rgpd_report.md
@@ -46,8 +47,8 @@ data/
 01_download.py
   └─► data/raw/  (Arrow IPC)
 
-02_build_sft.py  +  03_build_dpo.py
-  └─► data/processed/sft_raw/  +  dpo_raw/  (Dataset HF)
+02_build_sft.py  +  03_build_dpo.py  [+  03b_sft_errors.py  (optionnel, après SFT)]
+  └─► data/processed/sft_raw/  +  dpo_raw/  +  dpo_hard_negatives/  (Dataset HF)
 
 04_anonymize.py
   └─► data/processed/sft_anonymized/  +  dpo_anonymized/  (Dataset HF)
@@ -60,14 +61,21 @@ data/
 |--------|--------|--------|-------------------|
 | `01_download.py` | HuggingFace Hub | `data/raw/` | Téléchargement + cache local |
 | `02_build_sft.py` | 4 raw datasets | `processed/sft_raw/` (6 498 lignes) | MCQ/QA → `instruction/response` + `infer_urgency` |
-| `03_build_dpo.py` | ultramedical raw | `processed/dpo_raw/` (1 000 lignes) | Filtrage qualité + sous-échantillonnage stratifié |
+| `03_build_dpo.py` | `sft_raw` + `dpo_hard_negatives` (opt.) | `processed/dpo_raw/` (~2 154 lignes) | Paires synthétiques (swap table) + dédoublonnage sur prompt + merge hard negatives |
+| `03b_sft_errors.py` | `final/sft/train` + `checkpoints/sft` | `processed/dpo_hard_negatives/` (1 674 lignes) | Inférence SFT → paires (chosen=GT, rejected=erreur réelle) sur les 36.8% d'exemples mal classés |
 | `04_anonymize.py` | sft_raw + dpo_raw | `processed/*_anonymized/` | Presidio (spaCy FR+EN), 6 types d'entités RGPD |
 | `05_split_and_validate.py` | *_anonymized | `final/sft/` + `final/dpo/` | Split stratifié SFT 80/10/10 · DPO 90/10 + validation |
 
 ### Lancer le pipeline complet
 
 ```bash
-make data-pipeline
+make data-pipeline   # données de base (sans hard negatives)
+```
+
+Pour le pipeline DPO avec hard negatives (recommandé, après SFT) :
+
+```bash
+make dpo-pipeline-hard   # sft-errors → rebuild-dpo → train-dpo → evaluate-dpo → export
 ```
 
 ### Étapes individuelles (toutes idempotentes)
@@ -75,7 +83,9 @@ make data-pipeline
 ```bash
 make download        # Télécharge depuis HuggingFace
 make build-sft       # Construit le dataset SFT
-make build-dpo       # Construit le dataset DPO
+make build-dpo       # Construit le dataset DPO (merge hard negatives si disponibles)
+make sft-errors      # Génère les hard negatives DPO (requiert checkpoints/sft)
+make rebuild-dpo     # Reconstruit dpo_raw + re-lance anonymize + split
 make anonymize       # Anonymisation RGPD + rapport
 make split           # Split + rapport de validation
 ```
