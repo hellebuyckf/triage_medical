@@ -1,16 +1,67 @@
 """Script 03b — Generate hard-negative DPO pairs from SFT misclassifications.
 
-Runs the SFT model on the train split, collects examples where the model
-predicts the wrong urgency label, and builds DPO pairs:
-  - chosen  : ground-truth response (correct urgency label)
-  - rejected : SFT-generated response (wrong urgency label, real error)
+## Motivation
 
-These "hard negatives" are more informative than synthetic pairs because
-the rejected response contains the model's actual flawed reasoning, not
-just a label swap on identical clinical text.
+Standard synthetic DPO pairs (script 03) have a fundamental flaw: the
+``chosen`` and ``rejected`` responses share the *same clinical body* — only
+the urgency label differs.  Because the two texts are nearly identical, the
+DPO gradient concentrates on 2-3 tokens (the label) and provides almost no
+signal for the rest of the generation.  In practice this caused a ~10%
+accuracy regression vs the SFT baseline across three experiments.
 
-Output: data/processed/dpo_hard_negatives (HuggingFace Dataset)
-Requires: checkpoints/sft must exist (run 11_train_sft.py first).
+Hard negatives fix this by using the SFT model's *actual* wrong predictions
+as ``rejected`` responses.  The flawed reasoning is baked into the full
+response, giving DPO a real corrective signal at every token.
+
+## How it works
+
+1. **Load** the fine-tuned SFT model (base + LoRA adapter from checkpoints/sft).
+2. **Infer** on the *train* split (4 544 examples) in batches of 8.
+   Qwen3 chain-of-thought is suppressed by pre-filling ``<think>\\n\\n</think>``
+   so the urgency label appears immediately (required by the parser).
+3. **Filter** to keep only misclassified examples where:
+   - the generated response has a parseable urgency label, AND
+   - that label differs from the ground-truth label.
+4. **Build** one DPO pair per misclassified example:
+   - ``chosen``  = ground-truth response from ``data/final/sft/train``
+   - ``rejected`` = the SFT's actual wrong generation (wrong label + wrong reasoning)
+5. **Save** to ``data/processed/dpo_hard_negatives`` as a HuggingFace Dataset.
+
+## Key numbers (2026-03-25 run)
+
+- Train set : 4 544 examples
+- Misclassified : 1 674 (36.8 % SFT error rate)
+- Chosen label distribution  : moderate 987 / max 350 / deferred 337
+- Rejected label distribution: max 813 / deferred 705 / moderate 156
+  → SFT mainly over-predicts ``max`` for moderate cases, and
+    under-predicts ``max`` (predicts ``deferred``) for true max cases.
+
+## Integration
+
+This script is called by ``make sft-errors`` (after ``train-sft``).
+Script 03 then merges these hard negatives with ~480 synthetic pairs
+(``make rebuild-dpo``).  The combined dataset (~2 154 pairs) is used for
+DPO training via ``make dpo-pipeline-hard``.
+
+Results after merging hard negatives (DPO v4 vs SFT on test set):
+  Accuracy  : 63.80 % vs 63.80 % (regression eliminated, was -10 % before)
+  F1 Macro  : 0.633 vs 0.624   (+0.009)
+  F2 Macro  : 0.635 vs 0.629   (+0.005)
+  Recall max: 75 % vs ~65 %    (+10 pp, 139/186 correct vs 63-69)
+  max→deferred errors: 31 vs 115-121  (-75 %)
+
+## Output schema
+
+``data/processed/dpo_hard_negatives`` is a HuggingFace Dataset with columns:
+  prompt   : str  — original user instruction
+  chosen   : str  — ground-truth triage response (correct urgency label)
+  rejected : str  — SFT-generated response (wrong urgency label + reasoning)
+  source   : str  — always "sft_hard_negative"
+  language : str  — "en" or "fr"
+
+Prerequisites:
+  - ``data/final/sft`` must exist  (run ``make data-pipeline`` first)
+  - ``checkpoints/sft`` must exist (run ``make train-sft`` first)
 """
 
 from __future__ import annotations
