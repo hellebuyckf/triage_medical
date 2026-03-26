@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -37,6 +38,28 @@ _QWEN3_CHAT_TEMPLATE = (
     "{% endfor %}"
     "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
 )
+
+# Tokens d'anonymisation Presidio — le modèle les a appris sur le dataset SFT
+# et peut les reproduire à l'inférence. On les supprime proprement en post-processing.
+_PRESIDIO_TOKEN_RE = re.compile(r"<[A-Z_]{2,}>")
+
+
+def _clean_response(text: str) -> str:
+    """Supprime les tokens d'anonymisation Presidio résiduels de la réponse.
+
+    Le modèle a été entraîné sur des données anonymisées contenant des tokens
+    comme ``<PERSON>``, ``<LOCATION>``, ``<DATE_TIME>``, etc. Il peut les
+    reproduire à l'inférence. Cette fonction les retire pour éviter de les
+    exposer à l'utilisateur final.
+
+    Args:
+        text: Réponse brute générée par le modèle.
+
+    Returns:
+        Réponse nettoyée, sans tokens Presidio.
+    """
+    return _PRESIDIO_TOKEN_RE.sub("", text).strip()
+
 
 # ── État global de l'application ──────────────────────────────────────────────
 
@@ -183,6 +206,7 @@ async def triage(request: TriageRequest) -> TriageResponse:
 
     latency_ms = (time.monotonic() - t0) * 1000
 
+    raw_response = _clean_response(raw_response)
     urgency_level = extract_urgency_from_response(raw_response)
     urgency_label = URGENCY_LABELS.get(urgency_level or "", "URGENCE INDÉTERMINÉE")
 

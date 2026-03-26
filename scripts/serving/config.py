@@ -14,7 +14,8 @@ class ServerConfig(BaseSettings):
         max_model_len: Longueur maximale de séquence (prompt + réponse).
         dtype: Type de données pour les poids du modèle (``bfloat16`` recommandé).
         max_new_tokens: Nombre maximal de tokens à générer par requête.
-        temperature: Température de génération (1.0 = greedy avec do_sample=False).
+        temperature: Température de génération. 0.1 = quasi-greedy (recommandé pour
+            le triage médical — réduit les hallucinations). 1.0 = échantillonnage libre.
         port: Port d'écoute du serveur uvicorn.
         log_level: Niveau de log uvicorn (``info``, ``debug``, ``warning``).
 
@@ -28,7 +29,7 @@ class ServerConfig(BaseSettings):
     max_model_len: int = 1024
     dtype: str = "bfloat16"
     max_new_tokens: int = 512
-    temperature: float = 1.0
+    temperature: float = 0.1
     port: int = 8080
     log_level: str = "info"
 

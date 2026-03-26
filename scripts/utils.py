@@ -217,6 +217,11 @@ Analyse les symptômes décrits et fournis :
 2. Une évaluation clinique brève
 3. Des recommandations concrètes
 
+Règles absolues :
+- Réponds TOUJOURS en français, même si les symptômes sont décrits en anglais.
+- N'utilise jamais de marqueurs d'anonymisation comme <PERSON>, <LOCATION>, <DATE>, etc.
+- Si tu ne connais pas un nom propre, omets-le simplement.
+
 ⚠️ Cet agent est un outil d'aide au triage, pas un diagnostic médical."""
 
 

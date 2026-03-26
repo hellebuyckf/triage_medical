@@ -4,7 +4,7 @@
         dpo-pipeline dpo-pipeline-hard train-dpo evaluate-dpo export-model push-model \
         push-datasets push-datasets-all \
         mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow \
-        build-api serve-local api-health api-triage \
+        build-api serve-local serve-down serve-restart api-health api-triage \
         alpha-health alpha-triage alpha-url benchmark \
         clean clean-sft clean-dpo clean-all retrain help
 
@@ -194,6 +194,12 @@ build-api:
 serve-local:
 	docker compose up --build
 
+serve-down:
+	docker compose down
+
+serve-restart:
+	docker compose down && docker compose up --build
+
 api-health:
 	curl -s http://localhost:8080/health | python3 -m json.tool
 
@@ -308,6 +314,8 @@ help:
 	@echo "  API (FastAPI + vLLM)"
 	@echo "  make build-api         — construit l'image Docker API"
 	@echo "  make serve-local       — démarre l'API en local (docker compose, port 8080)"
+	@echo "  make serve-down        — arrête l'API (docker compose down)"
+	@echo "  make serve-restart     — redémarre l'API (down + build + up)"
 	@echo "  make api-health        — vérifie que l'API répond (GET /health)"
 	@echo "  make api-triage        — test rapide de l'endpoint POST /triage"
 	@echo "  make alpha-health      — health check via Tailscale ($(ALPHA_HOST))"
