@@ -1,0 +1,47 @@
+training:
+  max_seq_length: 1024
+
+  # ── Run D — beta réduit pour améliorer le Recall MAX ──────────────────────
+  #
+  # Historique des runs DPO :
+  #   Run B : beta=0.1, lr=5e-5  → mode collapse (95% "deferred", -25.5% accuracy)
+  #   Run C : beta=0.5, lr=2e-5  → Recall MAX 74.7% — régression vs SFT (76.3%)
+  #   Run D : beta=0.2, lr=1e-5  → objectif : récupérer Recall MAX ≥ 75%
+  #
+  # Raisonnement :
+  # - beta=0.5 maintient le modèle trop proche du SFT → il ne corrige pas
+  #   les cas max → moderate observés dans la matrice de confusion
+  # - beta=0.2 donne plus de liberté de divergence sans risquer le collapse
+  #   (Run B avait aussi LR=5e-5 ; avec LR=1e-5 le gradient est bien plus faible)
+  # - LR divisé par 2 (2e-5 → 1e-5) : compense la plus grande liberté de beta
+  #   plus bas — la mise à jour effective par step reste comparable au Run C
+  # - epochs=2 : compense la LR plus faible pour garantir un signal suffisant
+  #
+  # Signal d'alarme à surveiller pendant l'entraînement :
+  #   Si la distribution des prédictions tend vers ≥ 80% sur une seule classe
+  #   → arrêter et revenir à beta=0.3 (intermédiaire entre Run C et Run D)
+  # ──────────────────────────────────────────────────────────────────────────
+
+  beta: 0.2
+  learning_rate: 0.00001
+  epochs: 2
+
+  # Batch — inchangé (OOM confirmé au-dessus de batch_size=1 sur ce dataset)
+  batch_size: 1
+  grad_accum: 16
+  seed: 42
+
+lora:
+  # LoRA inchangé vs Run C — seuls les hyperparamètres DPO varient pour
+  # isoler l'effet de beta dans la comparaison des runs.
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - v_proj
+    - k_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
