@@ -4,6 +4,8 @@
         dpo-pipeline dpo-pipeline-hard train-dpo evaluate-dpo export-model push-model \
         push-datasets push-datasets-all \
         mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow \
+        build-api serve-local api-health api-triage \
+        alpha-health alpha-triage alpha-url benchmark \
         clean clean-sft clean-dpo clean-all retrain help
 
 # Variables
@@ -146,9 +148,8 @@ push-datasets-all: split
 
 # ── MLflow ────────────────────────────────────────────────────────────────────
 #
-# Accès depuis le Mac M3 via tunnel SSH :
-#   ssh -L 5000:localhost:5000 <user>@<ip_serveur>
-# puis ouvrir http://localhost:5000 dans le navigateur.
+# Accès depuis le Mac M3 via Tailscale (sans tunnel SSH) :
+#   http://$(ALPHA_HOST):5000
 
 mlflow: mlflow-build mlflow-up
 
@@ -158,12 +159,14 @@ mlflow-build:
 mlflow-up:
 	docker run -d \
 		--name $(MLFLOW_CONTAINER) \
-		-p 127.0.0.1:5000:5000 \
+		-p 5000:5000 \
+		-e MLFLOW_SERVER_ALLOWED_HOSTS="$(ALPHA_HOST),$(ALPHA_HOST):5000,localhost,127.0.0.1" \
+		-e MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE=true \
 		-v $(PWD)/mlflow.db:/mlflow.db \
 		-v $(PWD)/mlruns:/mlruns \
 		--restart unless-stopped \
 		$(MLFLOW_IMAGE)
-	@echo "MLflow UI démarré → tunnel SSH : ssh -L 5000:localhost:5000 <user>@<ip_serveur>"
+	@echo "MLflow UI démarré → http://$(ALPHA_HOST):5000"
 
 mlflow-down:
 	docker stop $(MLFLOW_CONTAINER) && docker rm $(MLFLOW_CONTAINER)
@@ -173,6 +176,62 @@ mlflow-logs:
 
 clean-mlflow:
 	rm -rf mlruns/ mlflow.db
+
+# ── API (FastAPI + vLLM) ──────────────────────────────────────────────────────
+#
+# Prérequis : checkpoints/dpo_merged/ doit exister (make export-model)
+#
+# Accès local  : http://localhost:8080/docs
+# Accès réseau : http://$(ALPHA_HOST):8080/docs  (via Tailscale, sans tunnel SSH)
+
+# IP Tailscale du serveur de calcul — accessible directement depuis le Mac M3.
+# Pour trouver l'IP : tailscale ip -4
+ALPHA_HOST ?= 100.115.15.123
+
+build-api:
+	docker build -t triage-api:latest .
+
+serve-local:
+	docker compose up --build
+
+api-health:
+	curl -s http://localhost:8080/health | python3 -m json.tool
+
+api-triage:
+	curl -s -X POST http://localhost:8080/triage \
+	  -H "Content-Type: application/json" \
+	  -d '{"symptoms": "Douleur thoracique intense, sudation, nausées depuis 30 minutes."}' \
+	  | python3 -m json.tool
+
+# Cibles alpha — interroge le serveur directement via Tailscale (sans tunnel SSH)
+alpha-health:
+	curl -s http://$(ALPHA_HOST):8080/health | python3 -m json.tool
+
+alpha-triage:
+	curl -s -X POST http://$(ALPHA_HOST):8080/triage \
+	  -H "Content-Type: application/json" \
+	  -d '{"symptoms": "Douleur thoracique intense, sudation, nausées depuis 30 minutes."}' \
+	  | python3 -m json.tool
+
+alpha-url:
+	@echo "API Triage CHSA (alpha) :"
+	@echo "  Docs    → http://$(ALPHA_HOST):8080/docs"
+	@echo "  Health  → http://$(ALPHA_HOST):8080/health"
+	@echo "  Triage  → POST http://$(ALPHA_HOST):8080/triage"
+
+# Usage : make benchmark
+#         make benchmark BENCH_N=30 BENCH_C=8 BENCH_P95=3000
+BENCH_URL   ?= http://localhost:8080
+BENCH_N     ?= 20
+BENCH_C     ?= 5
+BENCH_P95   ?= 5000
+
+benchmark:
+	$(PYTHON) scripts/serving/benchmark.py \
+	  --url $(BENCH_URL) \
+	  --n-requests $(BENCH_N) \
+	  --concurrency $(BENCH_C) \
+	  --p95-max-ms $(BENCH_P95)
 
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 
@@ -245,6 +304,18 @@ help:
 	@echo "  make mlflow-down       — arrête et supprime le conteneur"
 	@echo "  make mlflow-logs       — affiche les logs du conteneur"
 	@echo "  make clean-mlflow      — supprime tous les runs MLflow (mlruns/)"
+	@echo ""
+	@echo "  API (FastAPI + vLLM)"
+	@echo "  make build-api         — construit l'image Docker API"
+	@echo "  make serve-local       — démarre l'API en local (docker compose, port 8080)"
+	@echo "  make api-health        — vérifie que l'API répond (GET /health)"
+	@echo "  make api-triage        — test rapide de l'endpoint POST /triage"
+	@echo "  make alpha-health      — health check via Tailscale ($(ALPHA_HOST))"
+	@echo "  make alpha-triage      — test /triage via Tailscale"
+	@echo "  make alpha-url         — affiche les URLs alpha (Tailscale)"
+	@echo "  make benchmark         — benchmark latence (20 req séq. + 5 conc., SLA P95 ≤ 5 s)"
+	@echo "  make benchmark BENCH_N=30 BENCH_C=8 BENCH_P95=3000  — paramètres personnalisés"
+	@echo "  make benchmark BENCH_URL=http://$(ALPHA_HOST):8080   — benchmark via Tailscale"
 	@echo ""
 	@echo "  Nettoyage"
 	@echo "  make clean             — supprime raw/ et processed/"

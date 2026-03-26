@@ -132,6 +132,67 @@ make export-model         # Merge SFT+DPO LoRA → checkpoints/dpo_merged/
 
 All scripts are **idempotent**: re-running skips already completed steps.
 
+### Serving — API FastAPI + vLLM (local)
+
+The model is exposed via a FastAPI REST API powered by vLLM (PagedAttention inference).
+Requires `checkpoints/dpo_merged/` to exist (`make export-model`) and an NVIDIA GPU.
+
+```bash
+# Build the Docker image
+make build-api
+
+# Start the API (Docker Compose — mounts checkpoints/dpo_merged/ as read-only volume)
+make serve-local
+
+# From Mac M3, open an SSH tunnel first:
+#   ssh -L 8080:localhost:8080 <user>@<server_ip>
+
+# Verify the server is ready
+make api-health
+# → {"status": "ok", "model": "/model"}
+
+# Test the /triage endpoint
+make api-triage
+# → {"urgency_level": "max", "urgency_label": "URGENCE MAXIMALE", ...}
+
+# Interactive Swagger UI
+open http://localhost:8080/docs
+```
+
+**Without Docker** (faster for development, GPU on host):
+
+```bash
+uv pip install -e ".[serving]"
+MODEL_PATH=checkpoints/dpo_merged uvicorn scripts.serving.app:app --port 8080
+```
+
+#### API Endpoint
+
+`POST /triage` — takes a symptom description, returns a structured triage response:
+
+```bash
+curl -X POST http://localhost:8080/triage \
+  -H "Content-Type: application/json" \
+  -d '{"symptoms": "Douleur thoracique intense, sudation, nausées depuis 30 min."}'
+```
+
+```json
+{
+  "urgency_level": "max",
+  "urgency_label": "URGENCE MAXIMALE",
+  "raw_response": "URGENCE MAXIMALE\n\nÉvaluation clinique : ...\n\nRecommandations : ...",
+  "disclaimer": "⚠️ Cet agent est un outil d'aide au triage, pas un diagnostic médical.",
+  "model": "/model",
+  "latency_ms": 850.3
+}
+```
+
+#### Run unit tests (no GPU required)
+
+```bash
+uv run pytest tests/test_serving.py -v
+```
+
 ### Training config (YAML)
 
 Hyperparameters live in `configs/sft.yaml` and `configs/dpo.yaml`. Edit them directly, then retrain without touching Python code:

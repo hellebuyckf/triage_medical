@@ -1,0 +1,35 @@
+# Développement local — Agent de triage médical
+#
+# Prérequis :
+#   - Docker avec NVIDIA Container Toolkit installé
+#   - checkpoints/dpo_merged/ présent (généré par make export-model)
+#
+# Usage :
+#   make serve-local          # build + démarrage
+#   make api-health           # vérifie que l'API répond
+#   make api-triage           # test rapide de l'endpoint /triage
+#   docker compose logs -f    # logs en temps réel
+#   docker compose down       # arrêt
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      # Modèle monté en lecture seule depuis le répertoire local
+      - ./checkpoints/dpo_merged:/model:ro
+    environment:
+      - MODEL_PATH=/model
+      # Décommentez pour charger depuis HuggingFace Hub plutôt que le volume :
+      # - MODEL_PATH=your-username/qwen3-triage-dpo
+      # - HF_TOKEN=${HF_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
