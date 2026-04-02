@@ -86,19 +86,21 @@ Les outputs affichent l'URL du service et l'URL Artifact Registry à la fin.
 
 ## Accès à l'interface MLflow
 
-Le service est restreint à `authorized_invoker_email` — un token Google est requis.
+Le service est accessible publiquement — l'authentification est gérée par MLflow basic auth.
 
-**Depuis alpha-server :**
-```bash
-gcloud run services proxy mlflow --region=europe-west1 --project=oc-p14 --port=8080
-```
+Ouvrir directement **l'URL Cloud Run** dans le navigateur (voir output `cloudrun_service_url`).
 
-**Depuis le Mac (tunnel SSH, dans un autre terminal) :**
-```bash
-ssh -L 8080:localhost:8080 alpha-server -N
-```
+Identifiants configurés dans `terraform.tfvars` :
 
-Ouvrir **http://localhost:8080** dans le navigateur.
+| Variable | Défaut |
+|---|---|
+| `mlflow_admin_username` | `admin` |
+| `mlflow_admin_password` | à définir |
+
+> **Note** : la base de données des utilisateurs MLflow (`/tmp/auth.db`) est éphémère —
+> elle est recréée à chaque démarrage du conteneur avec les identifiants admin définis
+> dans les variables Terraform. Pour des utilisateurs supplémentaires persistants,
+> utiliser Secret Manager + un volume GCS pour `auth.db`.
 
 ## Outputs
 

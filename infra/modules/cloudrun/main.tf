@@ -111,22 +111,9 @@ resource "google_cloud_run_v2_service" "mlflow" {
         container_port = 5000
       }
 
-      # Cloud Run n'interpole pas les variables d'env dans les args :
-      # l'URI PostgreSQL est construite directement en HCL.
-      command = ["mlflow"]
-      args = [
-        "server",
-        "--backend-store-uri",
-        "postgresql://${var.db_user}:${var.db_password}@${var.db_host}:5432/${var.db_name}",
-        "--default-artifact-root",
-        var.artifact_root,
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "5000",
-      ]
-
-      # Variables d'env disponibles pour le code Python (os.environ)
+      # Le démarrage est géré par start.sh (ENTRYPOINT de l'image Docker).
+      # start.sh lit ces variables d'env pour construire basic_auth.ini
+      # et lancer mlflow server --app-name basic-auth.
       env {
         name  = "DB_USER"
         value = var.db_user
@@ -146,6 +133,22 @@ resource "google_cloud_run_v2_service" "mlflow" {
       env {
         name  = "ARTIFACT_ROOT"
         value = var.artifact_root
+      }
+      env {
+        name  = "MLFLOW_ADMIN_USERNAME"
+        value = var.mlflow_admin_username
+      }
+      env {
+        name  = "MLFLOW_ADMIN_PASSWORD"
+        value = var.mlflow_admin_password
+      }
+      env {
+        name  = "MLFLOW_AUTH_CONFIG_PATH"
+        value = "/tmp/basic_auth.ini"
+      }
+      env {
+        name  = "MLFLOW_FLASK_SERVER_SECRET_KEY"
+        value = var.mlflow_flask_secret_key
       }
       # Autoriser tous les Host headers (l'URL Cloud Run est inconnue à l'avance)
       env {
@@ -185,13 +188,13 @@ resource "google_cloud_run_v2_service" "mlflow" {
 }
 
 # ─────────────────────────────────────────────
-# IAM — accès public au service (POC)
+# IAM — accès public (authentification déléguée à MLflow basic auth)
 # ─────────────────────────────────────────────
 
-resource "google_cloud_run_v2_service_iam_member" "authorized_invoker" {
+resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
   project  = var.project_id
   location = var.region
   name     = google_cloud_run_v2_service.mlflow.name
   role     = "roles/run.invoker"
-  member   = "user:${var.authorized_invoker_email}"
+  member   = "allUsers"
 }

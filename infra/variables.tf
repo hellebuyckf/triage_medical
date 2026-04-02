@@ -45,7 +45,20 @@ variable "cloudrun_image_name" {
   default     = "mlflow"
 }
 
-variable "authorized_invoker_email" {
-  description = "Email Google autorisé à invoquer le service Cloud Run (ex: user@gmail.com)"
+variable "mlflow_admin_username" {
+  description = "Nom d'utilisateur administrateur MLflow (basic auth)"
   type        = string
+  default     = "admin"
+}
+
+variable "mlflow_admin_password" {
+  description = "Mot de passe administrateur MLflow (basic auth)"
+  type        = string
+  sensitive   = true
+}
+
+variable "mlflow_flask_secret_key" {
+  description = "Clé secrète Flask pour la protection CSRF (basic auth)"
+  type        = string
+  sensitive   = true
 }

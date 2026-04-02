@@ -51,9 +51,11 @@ module "cloudrun" {
   db_password     = var.db_password
   db_host         = module.cloudsql.private_ip
   db_name         = var.db_name
-  artifact_root            = "gs://${google_storage_bucket.mlflow_artifacts.name}/artifacts"
-  gcs_bucket_name          = google_storage_bucket.mlflow_artifacts.name
-  authorized_invoker_email = var.authorized_invoker_email
+  artifact_root         = "gs://${google_storage_bucket.mlflow_artifacts.name}/artifacts"
+  gcs_bucket_name       = google_storage_bucket.mlflow_artifacts.name
+  mlflow_admin_username   = var.mlflow_admin_username
+  mlflow_admin_password   = var.mlflow_admin_password
+  mlflow_flask_secret_key = var.mlflow_flask_secret_key
 }
 
 # ─────────────────────────────────────────────
