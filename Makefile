@@ -3,7 +3,6 @@
         sft-errors rebuild-dpo \
         dpo-pipeline dpo-pipeline-hard train-dpo evaluate-dpo export-model push-model \
         push-datasets push-datasets-all \
-        mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow \
         build-api serve-local serve-down serve-restart api-health api-triage \
         alpha-health alpha-triage alpha-url benchmark \
         clean clean-sft clean-dpo clean-all retrain help
@@ -12,8 +11,26 @@
 PYTHON          = uv run python
 DATA_PREP       = scripts/data_prep
 TRAINING        = scripts/training
-MLFLOW_IMAGE    = project14-mlflow
-MLFLOW_CONTAINER = project14-mlflow
+
+# Environnement cible : dev (défaut) ou demo
+# Usage : make train-sft ENV=demo   → logs vers MLflow GCP (Cloud Run)
+#         make train-sft            → logs vers MLflow local (SQLite)
+# Prérequis pour ENV=demo : gcloud auth login (une seule fois)
+ENV             ?= dev
+MLFLOW_TRACKING_URI := $(shell \
+    grep '^MLFLOW_TRACKING_URI=' .env.$(ENV) 2>/dev/null | head -1 | cut -d'=' -f2-)
+
+# Variables d'env injectées dans les cibles d'entraînement.
+# demo : ajoute un Identity Token Google Cloud (expire après 1h, régénéré automatiquement).
+ifeq ($(ENV),demo)
+_MLFLOW_ENVVARS = MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)" MLFLOW_TRACKING_TOKEN="$$(gcloud auth print-identity-token)"
+# En mode demo, google-cloud-storage est requis pour les artefacts GCS.
+# setup-gcp est ajouté comme prérequis automatique des cibles d'entraînement/évaluation.
+_GCP_PREREQ     = setup-gcp
+else
+_MLFLOW_ENVVARS = MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)"
+_GCP_PREREQ     =
+endif
 
 # Training config YAML
 # Usage : make train-sft SFT_CONFIG=configs/sft_fast.yaml
@@ -32,6 +49,16 @@ _HF_PRIVATE_FLAG = $(if $(filter 1,$(HF_PRIVATE)),--private,)
 # Example: make evaluate-sft EVAL_VAL=1
 EVAL_VAL        ?= 0
 _EVAL_VAL_FLAG  = $(if $(filter 1,$(EVAL_VAL)),--eval-val,)
+
+# IP Tailscale du serveur de calcul — accessible directement depuis le Mac M3.
+# Pour trouver l'IP : tailscale ip -4
+ALPHA_HOST      ?= 100.115.15.123
+
+# Benchmark
+BENCH_URL       ?= http://localhost:8080
+BENCH_N         ?= 20
+BENCH_C         ?= 5
+BENCH_P95       ?= 5000
 
 # Cible par défaut
 .DEFAULT_GOAL := help
@@ -70,6 +97,14 @@ anonymize: build-sft build-dpo
 split: anonymize
 	$(PYTHON) $(DATA_PREP)/05_split_and_validate.py
 
+# ── GCP extras (requis uniquement pour ENV=demo) ──────────────────────────────
+
+# Installe google-cloud-storage pour les artefacts GCS de MLflow.
+# Utilise uv pip install (additif) et non uv sync, pour ne pas désinstaller
+# les packages hors-lockfile comme unsloth.
+setup-gcp:
+	uv pip install "google-cloud-storage>=2.16"
+
 # ── SFT ───────────────────────────────────────────────────────────────────────
 
 sft-pipeline: prepare-tokenizer train-sft evaluate-sft
@@ -77,11 +112,11 @@ sft-pipeline: prepare-tokenizer train-sft evaluate-sft
 prepare-tokenizer:
 	$(PYTHON) $(TRAINING)/10_prepare_tokenizer.py
 
-train-sft: prepare-tokenizer
-	$(PYTHON) $(TRAINING)/11_train_sft.py --config $(SFT_CONFIG)
+train-sft: $(_GCP_PREREQ) prepare-tokenizer
+	$(_MLFLOW_ENVVARS) $(PYTHON) $(TRAINING)/11_train_sft.py --config $(SFT_CONFIG)
 
-evaluate-sft: train-sft
-	$(PYTHON) $(TRAINING)/12_evaluate_sft.py $(_EVAL_VAL_FLAG)
+evaluate-sft: $(_GCP_PREREQ) train-sft
+	$(_MLFLOW_ENVVARS) $(PYTHON) $(TRAINING)/12_evaluate_sft.py $(_EVAL_VAL_FLAG)
 
 # ── DPO ───────────────────────────────────────────────────────────────────────
 
@@ -103,11 +138,11 @@ dpo-pipeline-hard: rebuild-dpo clean-dpo dpo-pipeline
 
 dpo-pipeline: train-dpo evaluate-dpo export-model
 
-train-dpo:
-	$(PYTHON) $(TRAINING)/20_train_dpo.py --config $(DPO_CONFIG)
+train-dpo: $(_GCP_PREREQ)
+	$(_MLFLOW_ENVVARS) $(PYTHON) $(TRAINING)/20_train_dpo.py --config $(DPO_CONFIG)
 
-evaluate-dpo: train-dpo
-	$(PYTHON) $(TRAINING)/21_evaluate_dpo.py $(_EVAL_VAL_FLAG)
+evaluate-dpo: $(_GCP_PREREQ) train-dpo
+	$(_MLFLOW_ENVVARS) $(PYTHON) $(TRAINING)/21_evaluate_dpo.py $(_EVAL_VAL_FLAG)
 
 export-model: evaluate-dpo
 	$(PYTHON) $(TRAINING)/22_export_model.py --skip-verify
@@ -146,47 +181,12 @@ push-datasets-all: split
 		--include-processed \
 		$(_HF_PRIVATE_FLAG)
 
-# ── MLflow ────────────────────────────────────────────────────────────────────
-#
-# Accès depuis le Mac M3 via Tailscale (sans tunnel SSH) :
-#   http://$(ALPHA_HOST):5000
-
-mlflow: mlflow-build mlflow-up
-
-mlflow-build:
-	docker build -t $(MLFLOW_IMAGE) -f docker/mlflow/Dockerfile .
-
-mlflow-up:
-	docker run -d \
-		--name $(MLFLOW_CONTAINER) \
-		-p 5000:5000 \
-		-e MLFLOW_SERVER_ALLOWED_HOSTS="$(ALPHA_HOST),$(ALPHA_HOST):5000,localhost,127.0.0.1" \
-		-e MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE=true \
-		-v $(PWD)/mlflow.db:/mlflow.db \
-		-v $(PWD)/mlruns:/mlruns \
-		--restart unless-stopped \
-		$(MLFLOW_IMAGE)
-	@echo "MLflow UI démarré → http://$(ALPHA_HOST):5000"
-
-mlflow-down:
-	docker stop $(MLFLOW_CONTAINER) && docker rm $(MLFLOW_CONTAINER)
-
-mlflow-logs:
-	docker logs -f $(MLFLOW_CONTAINER)
-
-clean-mlflow:
-	rm -rf mlruns/ mlflow.db
-
 # ── API (FastAPI + vLLM) ──────────────────────────────────────────────────────
 #
 # Prérequis : checkpoints/dpo_merged/ doit exister (make export-model)
 #
 # Accès local  : http://localhost:8080/docs
 # Accès réseau : http://$(ALPHA_HOST):8080/docs  (via Tailscale, sans tunnel SSH)
-
-# IP Tailscale du serveur de calcul — accessible directement depuis le Mac M3.
-# Pour trouver l'IP : tailscale ip -4
-ALPHA_HOST ?= 100.115.15.123
 
 build-api:
 	docker build -t triage-api:latest .
@@ -224,13 +224,6 @@ alpha-url:
 	@echo "  Docs    → http://$(ALPHA_HOST):8080/docs"
 	@echo "  Health  → http://$(ALPHA_HOST):8080/health"
 	@echo "  Triage  → POST http://$(ALPHA_HOST):8080/triage"
-
-# Usage : make benchmark
-#         make benchmark BENCH_N=30 BENCH_C=8 BENCH_P95=3000
-BENCH_URL   ?= http://localhost:8080
-BENCH_N     ?= 20
-BENCH_C     ?= 5
-BENCH_P95   ?= 5000
 
 benchmark:
 	$(PYTHON) scripts/serving/benchmark.py \
@@ -280,6 +273,11 @@ help:
 	@echo "  make anonymize         — anonymisation RGPD + rapport"
 	@echo "  make split             — split train/val/test + validation"
 	@echo ""
+	@echo "  Environnements"
+	@echo "  ENV=dev  (défaut)  — MLflow local SQLite (alpha-server)"
+	@echo "  ENV=demo           — MLflow GCP Cloud Run (lit .env.demo)"
+	@echo "  Exemple : make train-sft ENV=demo"
+	@echo ""
 	@echo "  SFT"
 	@echo "  make sft-pipeline      — pipeline complet SFT (tokenize → train → eval)"
 	@echo "  make prepare-tokenizer — tokenisation + formatage ChatML"
@@ -303,14 +301,6 @@ help:
 	@echo "  make push-datasets-all HF_USERNAME=<user>  — idem + datasets intermédiaires"
 	@echo "  make push-datasets HF_USERNAME=<user> HF_PRIVATE=1  — dépôts privés"
 	@echo ""
-	@echo "  MLflow"
-	@echo "  make mlflow            — build + démarre le conteneur MLflow"
-	@echo "  make mlflow-build      — construit l'image Docker MLflow"
-	@echo "  make mlflow-up         — démarre le conteneur (port 127.0.0.1:5000)"
-	@echo "  make mlflow-down       — arrête et supprime le conteneur"
-	@echo "  make mlflow-logs       — affiche les logs du conteneur"
-	@echo "  make clean-mlflow      — supprime tous les runs MLflow (mlruns/)"
-	@echo ""
 	@echo "  API (FastAPI + vLLM)"
 	@echo "  make build-api         — construit l'image Docker API"
 	@echo "  make serve-local       — démarre l'API en local (docker compose, port 8080)"
@@ -331,3 +321,5 @@ help:
 	@echo "  make clean-dpo         — supprime checkpoints/dpo et dpo_merged/"
 	@echo "  make clean-all         — supprime tout data/ et checkpoints/"
 	@echo "  make retrain           — clean SFT+DPO puis relance le pipeline complet (sans data)"
+	@echo ""
+	@echo "  Infrastructure → cd infra && make help"
