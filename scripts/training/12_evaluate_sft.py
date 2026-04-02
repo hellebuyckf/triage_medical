@@ -34,7 +34,7 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizerFast,
 )
-from utils import SYSTEM_PROMPT, extract_urgency_from_response, get_logger
+from utils import SYSTEM_PROMPT, check_demo_env, extract_urgency_from_response, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
@@ -53,7 +53,10 @@ N_EXAMPLES = 10
 BATCH_SIZE_EVAL = 8  # examples per GPU batch — reduce to 4 or 2 if CUDA OOM
 
 MLFLOW_EXPERIMENT = "sft-qwen3-1.7b-triage"
-MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
+MLFLOW_TRACKING_URI = os.getenv(
+    "MLFLOW_TRACKING_URI",
+    f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}",
+)
 
 URGENCY_LABELS = ["max", "moderate", "deferred"]
 
@@ -728,6 +731,7 @@ def main() -> None:
         help="Évalue aussi sur le val set (biaisé — voir note ci-dessous). Désactivé par défaut.",
     )
     args = parser.parse_args()
+    check_demo_env()
 
     logger = get_logger("12_evaluate_sft", verbose=args.verbose)
 

@@ -35,6 +35,7 @@ from transformers import (
 )
 from utils import (
     SYSTEM_PROMPT,
+    check_demo_env,
     extract_urgency_from_response,
     get_logger,
 )
@@ -71,7 +72,10 @@ CLINICAL_THRESHOLDS: dict[str, float] = {
 }
 
 MLFLOW_EXPERIMENT = "dpo-qwen3-1.7b-triage"
-MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
+MLFLOW_TRACKING_URI = os.getenv(
+    "MLFLOW_TRACKING_URI",
+    f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}",
+)
 
 # Regex pour supprimer les artifacts de génération Qwen3 :
 # - ForCanBeConverted, 𫟦, caractères de remplacement Unicode (U+FFFD)
@@ -821,6 +825,7 @@ def main() -> None:
         help="Évalue aussi sur le val set (biaisé — voir note ci-dessous). Désactivé par défaut.",
     )
     args = parser.parse_args()
+    check_demo_env()
 
     logger = get_logger("21_evaluate_dpo", verbose=args.verbose)
 
