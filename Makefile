@@ -8,6 +8,9 @@
         clean clean-sft clean-dpo clean-all retrain help
 
 # Variables
+-include .env
+export
+
 PYTHON          = uv run python
 DATA_PREP       = scripts/data_prep
 TRAINING        = scripts/training
@@ -158,6 +161,14 @@ push-model: export-model
 		--repo-id $(HF_USERNAME)/qwen3-triage-dpo \
 		--skip-verify
 
+upload-model:
+	@if [ -z "$(HF_USERNAME)" ]; then \
+		echo "Erreur : HF_USERNAME non défini."; \
+		echo "Usage  : make upload-model HF_USERNAME=<votre_username>"; \
+		exit 1; \
+	fi
+	uv run huggingface-cli upload $(HF_USERNAME)/qwen3-triage-dpo ./checkpoints/dpo_merged/
+
 # ── HuggingFace Hub ───────────────────────────────────────────────────────────
 
 push-datasets: split
@@ -297,6 +308,7 @@ help:
 	@echo ""
 	@echo "  HuggingFace Hub"
 	@echo "  make push-model HF_USERNAME=<user>         — push modèle fusionné (username/qwen3-triage-dpo)"
+	@echo "  make upload-model HF_USERNAME=<user>       — upload le modèle déjà fusionné (compatible Mac)"
 	@echo "  make push-datasets HF_USERNAME=<user>      — publie sft + dpo finaux (DatasetDict)"
 	@echo "  make push-datasets-all HF_USERNAME=<user>  — idem + datasets intermédiaires"
 	@echo "  make push-datasets HF_USERNAME=<user> HF_PRIVATE=1  — dépôts privés"

@@ -14,7 +14,7 @@ import torch
 # Workaround : Unsloth patche les modèles Qwen3 au niveau de transformers à l'installation.
 # Même en chargeant via AutoModelForCausalLM, les forward patchés produisent des tenseurs
 # non-contigus qui crashent cuBLAS standard. cublasLt utilise un code path compatible.
-torch.backends.cuda.preferred_blas_library("cublaslt")
+if torch.cuda.is_available(): torch.backends.cuda.preferred_blas_library("cublaslt")
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
