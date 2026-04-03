@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from functools import partial
@@ -49,7 +50,7 @@ from dotenv import load_dotenv
 from peft import PeftModel
 from transformers import PreTrainedModel, PreTrainedTokenizerFast, set_seed
 from trl import DPOConfig, DPOTrainer
-from utils import SYSTEM_PROMPT, get_latest_checkpoint, get_logger
+from utils import SYSTEM_PROMPT, check_demo_env, get_latest_checkpoint, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
@@ -63,7 +64,10 @@ DPO_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "dpo"
 DPO_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "dpo"
 
 MLFLOW_EXPERIMENT = "dpo-qwen3-1.7b-triage"
-MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
+MLFLOW_TRACKING_URI = os.getenv(
+    "MLFLOW_TRACKING_URI",
+    f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}",
+)
 REGISTERED_MODEL_NAME = "dpo-qwen3-1.7b-triage"
 
 
@@ -352,6 +356,38 @@ def log_model_info(model: PreTrainedModel, logger: Logger) -> None:
     )
 
 
+def refresh_mlflow_token(logger: Logger) -> None:
+    """Refresh the GCP OIDC identity token used to authenticate against MLflow on Cloud Run.
+
+    GCP identity tokens expire after 1 hour. DPO training typically exceeds this
+    limit, so the token must be refreshed before post-training MLflow calls
+    (log_model, end_run) to avoid 401 Unauthorized errors.
+
+    No-op when MLFLOW_TRACKING_URI is a local SQLite path (no token needed).
+
+    Args:
+        logger: Logger instance for status and warning messages.
+    """
+    if not MLFLOW_TRACKING_URI.startswith("https://"):
+        return
+    try:
+        result = subprocess.run(
+            ["gcloud", "auth", "print-identity-token"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        os.environ["MLFLOW_TRACKING_TOKEN"] = result.stdout.strip()
+        # Re-set the tracking URI so MLflow's internal REST store picks up the
+        # new token on the next get_host_creds() call.
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        logger.info("MLflow GCP identity token refreshed.")
+    except FileNotFoundError:
+        logger.warning("gcloud not found — cannot refresh MLflow token.")
+    except subprocess.CalledProcessError as exc:
+        logger.warning("gcloud auth print-identity-token failed: {}", exc.stderr.strip())
+
+
 def main() -> None:
     """Pipeline DPO complet.
 
@@ -369,6 +405,7 @@ def main() -> None:
     parser.add_argument("--beta", type=float, default=None, help="Override pénalité KL DPO")
     parser.add_argument("--epochs", type=int, default=None, help="Override nombre d'epochs")
     args = parser.parse_args()
+    check_demo_env()
 
     training_cfg = DPOTrainingConfig.from_yaml(
         load_training_config(args.config),
@@ -477,6 +514,10 @@ def main() -> None:
         trainer.save_model(str(DPO_CHECKPOINT))
         tokenizer.save_pretrained(str(DPO_CHECKPOINT))
         logger.info("Adaptateur LoRA DPO sauvegardé dans {}", DPO_CHECKPOINT)
+
+        # Refresh the GCP identity token before log_model: training typically
+        # exceeds the 1-hour token TTL, which would cause a 401 on Cloud Run.
+        refresh_mlflow_token(logger)
 
         # pip_requirements is set explicitly to bypass mlflow's auto-detection,
         # which tries to import tensorflow (not installed) and crashes.

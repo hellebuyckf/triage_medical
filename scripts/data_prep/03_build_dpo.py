@@ -27,8 +27,10 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from collections import Counter
+
 from datasets import Dataset, concatenate_datasets, load_from_disk
-from utils import DPO_COLUMNS, format_triage_response, get_logger
+from utils import DPO_COLUMNS, extract_urgency_from_response, format_triage_response, get_logger
 
 PROJECT_ROOT = _SCRIPTS_DIR.parent
 # sft_raw is produced by 02_build_sft.py and available before this script runs.
@@ -39,8 +41,12 @@ OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "dpo_raw"
 DPO_SOURCE = "sft_synthetic"
 SEED = 42
 
-# Target number of DPO pairs after stratified undersampling.
-DPO_TARGET_PAIRS = 1000
+# Target number of synthetic DPO pairs after stratified undersampling.
+# When hard negatives are available, synthetic pairs are capped at this value
+# and merged with all available hard negatives.
+DPO_TARGET_PAIRS = 500
+
+HARD_NEGATIVES_PATH = PROJECT_ROOT / "data" / "processed" / "dpo_hard_negatives"
 
 # Rejected urgency level for each correct level (safety-first policy).
 # Each label appears in rejected ~equally often; "différée" is heavily penalised
@@ -137,11 +143,63 @@ def stratified_subsample(ds: Dataset, target: int, seed: int = SEED) -> Dataset:
     return concatenate_datasets(splits).shuffle(seed=seed)
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def deduplicate_on_prompt(ds: Dataset, seed: int = SEED) -> Dataset:
+    """Remove duplicate prompts, keeping one pair per unique prompt.
+
+    Duplicate prompts arise from anonymisation: different pathologies anonymised
+    to the same ``<PERSON>`` placeholder produce identical prompts with different
+    urgency labels, sending contradictory DPO gradients.
+
+    When a prompt appears multiple times, the pair with the highest-urgency
+    ``chosen`` label is kept (safety-first: prefer max > moderate > deferred).
+
+    Args:
+        ds: DPO dataset with ``prompt`` and ``chosen`` columns.
+        seed: Random seed used to shuffle before deduplication.
+
+    Returns:
+        Dataset with at most one pair per unique prompt.
+    """
+    _urgency_rank = {"max": 2, "moderate": 1, "deferred": 0}
+
+    # Shuffle first so that ties between same-rank pairs are broken randomly.
+    ds = ds.shuffle(seed=seed)
+
+    seen: set[str] = set()
+    keep_indices: list[int] = []
+    # Sort by urgency rank descending so the highest-urgency pair is encountered first.
+    ranked = sorted(
+        range(len(ds)),
+        key=lambda i: _urgency_rank.get(
+            extract_urgency_from_response(ds[i]["chosen"]) or "deferred", 0
+        ),
+        reverse=True,
+    )
+    for idx in ranked:
+        prompt = ds[idx]["prompt"]
+        if prompt not in seen:
+            seen.add(prompt)
+            keep_indices.append(idx)
+
+    return ds.select(sorted(keep_indices))
+
+
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 
+def _log_label_distribution(ds: Dataset, name: str, logger) -> None:  # type: ignore[no-untyped-def]
+    """Log chosen/rejected label distribution for a dataset."""
+    chosen_labels = [extract_urgency_from_response(r) or "unknown" for r in ds["chosen"]]
+    rejected_labels = [extract_urgency_from_response(r) or "unknown" for r in ds["rejected"]]
+    logger.info("  {} chosen  : {}", name, dict(Counter(chosen_labels)))
+    logger.info("  {} rejected: {}", name, dict(Counter(rejected_labels)))
+
+
 def main() -> None:
-    """Build synthetic DPO pairs from the SFT train split and save to disk."""
+    """Build DPO dataset: synthetic pairs + optional hard negatives, deduplicated."""
     parser = argparse.ArgumentParser(description="Build synthetic DPO dataset from SFT train split")
     parser.add_argument("--verbose", action="store_true", help="Enable DEBUG logging")
     args = parser.parse_args()
@@ -162,28 +220,49 @@ def main() -> None:
     ds_train = load_from_disk(str(SFT_RAW_DIR))
     logger.info("SFT raw: {} examples.", len(ds_train))
 
-    # Stratified undersampling before transform (cheaper on raw SFT rows).
-    logger.info("Stratified undersampling to {} pairs...", DPO_TARGET_PAIRS)
+    # ── Synthetic pairs ────────────────────────────────────────────────────────
+    logger.info("Stratified undersampling to {} synthetic pairs...", DPO_TARGET_PAIRS)
     ds_sampled = stratified_subsample(ds_train, target=DPO_TARGET_PAIRS, seed=SEED)
-    logger.info("After undersampling: {} pairs.", len(ds_sampled))
-
-    # Build synthetic pairs.
-    ds_dpo = ds_sampled.map(
+    ds_synthetic = ds_sampled.map(
         build_synthetic_pair,
         remove_columns=ds_sampled.column_names,
         desc="Building synthetic DPO pairs",
     ).select_columns(DPO_COLUMNS)
 
+    # Deduplicate on prompt to remove contradictory training signal from
+    # anonymised prompts (e.g. "<PERSON> syndrome" mapping to 3 urgency levels).
+    n_before = len(ds_synthetic)
+    ds_synthetic = deduplicate_on_prompt(ds_synthetic, seed=SEED)
+    logger.info(
+        "Synthetic pairs: {} → {} after deduplication ({} removed).",
+        n_before,
+        len(ds_synthetic),
+        n_before - len(ds_synthetic),
+    )
+    _log_label_distribution(ds_synthetic, "synthetic", logger)
+
+    # ── Hard negatives (optional) ──────────────────────────────────────────────
+    if HARD_NEGATIVES_PATH.exists():
+        ds_hard = Dataset.load_from_disk(str(HARD_NEGATIVES_PATH))
+        logger.info("Hard negatives loaded: {} pairs from {}.", len(ds_hard), HARD_NEGATIVES_PATH)
+        _log_label_distribution(ds_hard, "hard-neg", logger)
+        ds_dpo = concatenate_datasets([ds_synthetic, ds_hard]).shuffle(seed=SEED)
+        logger.info(
+            "Final DPO dataset: {} synthetic + {} hard-neg = {} pairs.",
+            len(ds_synthetic),
+            len(ds_hard),
+            len(ds_dpo),
+        )
+    else:
+        logger.info(
+            "No hard negatives found at {} — using synthetic pairs only.", HARD_NEGATIVES_PATH
+        )
+        logger.info("Run 'make sft-errors' after SFT training to generate hard negatives.")
+        ds_dpo = ds_synthetic.shuffle(seed=SEED)
+
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     ds_dpo.save_to_disk(str(OUTPUT_PATH))
     logger.info("DPO dataset: {} pairs saved to {}.", len(ds_dpo), OUTPUT_PATH)
-
-    # Log urgency distribution for sanity check.
-    prompts_sample = ds_dpo.select(range(min(10, len(ds_dpo))))
-    logger.info("Sample chosen responses (first 80 chars):")
-    for row in prompts_sample:
-        logger.info("  chosen : {}", row["chosen"][:80].replace("\n", " "))
-        logger.info("  rejected: {}", row["rejected"][:80].replace("\n", " "))
 
 
 if __name__ == "__main__":

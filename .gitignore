@@ -196,3 +196,15 @@ scripts/data_prep/__pycache__/
 unsloth_compiled_cache/
 # Evaluation reports
 reports/
+# State local (si pas de backend distant)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Valeurs sensibles
+*.tfvars
+!*.tfvars.example
+.env.mlflow
+.env.demo
+specs/

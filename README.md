@@ -29,7 +29,8 @@ project14/
 │   ├── data_prep/
 │   │   ├── 01_download.py            # Step 1: Download HuggingFace datasets
 │   │   ├── 02_build_sft.py           # Step 2: Build SFT dataset
-│   │   ├── 03_build_dpo.py           # Step 3: Build DPO dataset
+│   │   ├── 03_build_dpo.py           # Step 3: Build DPO dataset (synthetic pairs + hard negatives)
+│   │   ├── 03b_sft_errors.py         # Step 3b: Generate hard-negative pairs from SFT errors
 │   │   ├── 04_anonymize.py           # Step 4: GDPR anonymization (Presidio)
 │   │   ├── 05_split_and_validate.py  # Step 5: Train/val/test split + validation
 │   │   └── 06_push_to_hub.py         # Step 6: Push datasets to HuggingFace Hub
@@ -99,13 +100,16 @@ make retrain        # clean SFT+DPO checkpoints → SFT pipeline → DPO pipelin
 
 ```bash
 # Stage 1 — Data
-make data-pipeline  # download → build-sft → build-dpo → anonymize → split
+make data-pipeline       # download → build-sft → build-dpo → anonymize → split
 
 # Stage 2 — SFT
-make sft-pipeline   # prepare-tokenizer → train-sft → evaluate-sft
+make sft-pipeline        # prepare-tokenizer → train-sft → evaluate-sft
 
-# Stage 3 — DPO
-make dpo-pipeline   # train-dpo → evaluate-dpo → export-model
+# Stage 3 — DPO (standard — synthetic pairs only)
+make dpo-pipeline        # train-dpo → evaluate-dpo → export-model
+
+# Stage 3 — DPO (recommended — hard negatives from SFT errors)
+make dpo-pipeline-hard   # sft-errors → rebuild-dpo → train-dpo → evaluate-dpo → export-model
 ```
 
 ### Individual steps
@@ -113,7 +117,9 @@ make dpo-pipeline   # train-dpo → evaluate-dpo → export-model
 ```bash
 make download             # Download datasets from HuggingFace
 make build-sft            # Build SFT dataset (~6 500 instruction/response pairs)
-make build-dpo            # Build DPO dataset (chosen/rejected pairs)
+make build-dpo            # Build DPO dataset (synthetic pairs; merges hard negatives if available)
+make sft-errors           # Generate hard-negative DPO pairs from SFT misclassifications (requires checkpoints/sft)
+make rebuild-dpo          # Regenerate DPO dataset from scratch + re-run anonymize + split
 make anonymize            # GDPR anonymization + report
 make split                # Train/val/test split + validation report
 make prepare-tokenizer    # Tokenize + format ChatML, save Arrow datasets
@@ -125,6 +131,67 @@ make export-model         # Merge SFT+DPO LoRA → checkpoints/dpo_merged/
 ```
 
 All scripts are **idempotent**: re-running skips already completed steps.
+
+### Serving — API FastAPI + vLLM (local)
+
+The model is exposed via a FastAPI REST API powered by vLLM (PagedAttention inference).
+Requires `checkpoints/dpo_merged/` to exist (`make export-model`) and an NVIDIA GPU.
+
+```bash
+# Build the Docker image
+make build-api
+
+# Start the API (Docker Compose — mounts checkpoints/dpo_merged/ as read-only volume)
+make serve-local
+
+# From Mac M3, open an SSH tunnel first:
+#   ssh -L 8080:localhost:8080 <user>@<server_ip>
+
+# Verify the server is ready
+make api-health
+# → {"status": "ok", "model": "/model"}
+
+# Test the /triage endpoint
+make api-triage
+# → {"urgency_level": "max", "urgency_label": "URGENCE MAXIMALE", ...}
+
+# Interactive Swagger UI
+open http://localhost:8080/docs
+```
+
+**Without Docker** (faster for development, GPU on host):
+
+```bash
+uv pip install -e ".[serving]"
+MODEL_PATH=checkpoints/dpo_merged uvicorn scripts.serving.app:app --port 8080
+```
+
+#### API Endpoint
+
+`POST /triage` — takes a symptom description, returns a structured triage response:
+
+```bash
+curl -X POST http://localhost:8080/triage \
+  -H "Content-Type: application/json" \
+  -d '{"symptoms": "Douleur thoracique intense, sudation, nausées depuis 30 min."}'
+```
+
+```json
+{
+  "urgency_level": "max",
+  "urgency_label": "URGENCE MAXIMALE",
+  "raw_response": "URGENCE MAXIMALE\n\nÉvaluation clinique : ...\n\nRecommandations : ...",
+  "disclaimer": "⚠️ Cet agent est un outil d'aide au triage, pas un diagnostic médical.",
+  "model": "/model",
+  "latency_ms": 850.3
+}
+```
+
+#### Run unit tests (no GPU required)
+
+```bash
+uv run pytest tests/test_serving.py -v
+```
 
 ### Training config (YAML)
 
@@ -169,13 +236,25 @@ make clean-all      # Remove all data/ and checkpoints/
 
 ## Data Sources
 
-| Dataset | HuggingFace ID | Usage | Language | Size |
-|---|---|---|---|---|
-| FrenchMedMCQA | `nthngdy/frenchmedmcqa` | SFT | FR | ~3 105 |
-| MedQuAD | `keivalya/MedQuad-MedicalQnADataset` | SFT | EN | ~16 407 |
-| MediQAl (mcqu) | `ANR-MALADES/MediQAl` (config: `mcqu`) | SFT | FR | ~17 017 |
-| MediQAl (oeq) | `ANR-MALADES/MediQAl` (config: `oeq`) | SFT | FR | ~4 969 |
-| UltraMedical-Preference | `TsinghuaC3I/UltraMedical-Preference` | DPO | EN | 100K+ |
+### SFT
+
+| Dataset | HuggingFace ID | Language | Size |
+|---|---|---|---|
+| FrenchMedMCQA | `nthngdy/frenchmedmcqa` | FR | ~3 105 |
+| MedQuAD | `keivalya/MedQuad-MedicalQnADataset` | EN | ~16 407 |
+| MediQAl (mcqu) | `ANR-MALADES/MediQAl` (config: `mcqu`) | FR | ~17 017 |
+| MediQAl (oeq) | `ANR-MALADES/MediQAl` (config: `oeq`) | FR | ~4 969 |
+
+### DPO
+
+The DPO dataset combines two sources:
+
+| Source | Script | Pairs | Description |
+|---|---|---|---|
+| Synthetic (swap) | `03_build_dpo.py` | ~480 | SFT ground-truth response as `chosen`; same body with wrong urgency label as `rejected`. Swap table: `max→deferred`, `moderate→deferred`, `deferred→moderate`. |
+| Hard negatives | `03b_sft_errors.py` | ~1 674 | SFT model's actual wrong predictions as `rejected`. Generated by running SFT inference on the train set and keeping misclassified examples. |
+
+**Total: ~2 154 pairs** (90/10 train/val split). Hard negatives require `checkpoints/sft` to exist.
 
 ---
 
@@ -197,10 +276,10 @@ make clean-all      # Remove all data/ and checkpoints/
 | Column | Type | Description |
 |---|---|---|
 | `prompt` | `str` | Instruction / question |
-| `chosen` | `str` | Clinically preferred response |
-| `rejected` | `str` | Non-preferred response |
-| `source` | `str` | `"ultramedical_preference"` |
-| `language` | `str` | `"en"` |
+| `chosen` | `str` | Ground-truth response (correct urgency label) |
+| `rejected` | `str` | Wrong response (swapped label or SFT's actual error) |
+| `source` | `str` | `"sft_synthetic"` or `"sft_hard_negative"` |
+| `language` | `str` | `"en"` or `"fr"` |
 
 ---
 
@@ -226,9 +305,28 @@ All tunable hyperparameters live in `configs/`. No Python code changes needed to
 training:
   max_seq_length: 1024
   learning_rate: 0.0002
-  epochs: 5
+  epochs: 8          # 8 epochs for better moderate-class boundary convergence
   batch_size: 4
-  grad_accum: 4    # effective batch = 16
+  grad_accum: 4      # effective batch = 16
+  seed: 42
+
+lora:
+  r: 64              # higher rank for 3-class boundary discrimination
+  alpha: 128
+  dropout: 0.0       # no dropout on small dataset (~5k examples)
+  target_modules: [q_proj, v_proj, k_proj, o_proj, gate_proj, up_proj, down_proj]
+```
+
+### `configs/dpo.yaml`
+
+```yaml
+training:
+  max_seq_length: 1024
+  beta: 0.5          # KL penalty — keeps DPO close to SFT reference
+  learning_rate: 0.00002
+  epochs: 1
+  batch_size: 1      # reduced from 2 to avoid OOM with longer hard-negative sequences
+  grad_accum: 16     # effective batch = 16
   seed: 42
 
 lora:
@@ -238,10 +336,6 @@ lora:
   target_modules: [q_proj, v_proj, k_proj, o_proj, gate_proj, up_proj, down_proj]
 ```
 
-### `configs/dpo.yaml`
-
-Same structure, plus `beta: 0.1` (KL penalty strength) under `training:`.
-
 ---
 
 ## Deliverables by Week
@@ -250,7 +344,7 @@ Same structure, plus `beta: 0.1` (KL penalty strength) under `training:`.
 |---|---|---|
 | **S1** | `data/final/` — 5 Parquet files + `rgpd_report.md` + `stats_report.md` | ✅ Done |
 | **S2** | SFT checkpoint (`checkpoints/sft/`) + MLflow run + `reports/sft/eval_report_*.md` | ✅ Done |
-| **S3** | DPO checkpoint + merged model (`checkpoints/dpo_merged/`) + `reports/dpo/eval_report_*.md` | 🔄 In progress |
+| **S3** | DPO checkpoint + merged model (`checkpoints/dpo_merged/`) + `reports/dpo/eval_report_*.md` | ✅ Done |
 | **S4** | Cloud `/triage` endpoint + CI/CD pipeline + technical report (≤ 20 pages) | ⏳ Upcoming |
 
 ---

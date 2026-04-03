@@ -1,0 +1,17 @@
+# State Terraform (local)
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Répertoire de travail Terraform
+.terraform/
+.terraform.lock.hcl
+
+# Fichiers de variables (contiennent des secrets)
+terraform.tfvars
+*.auto.tfvars
+
+# Fichiers temporaires
+*.tfplan
+crash.log
+crash.*.log

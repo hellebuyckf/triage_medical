@@ -1,15 +1,12 @@
 FROM python:3.11-slim
 
-RUN pip install --no-cache-dir "mlflow>=2.13"
+RUN pip install --no-cache-dir \
+    "mlflow[auth]>=2.13" \
+    psycopg2-binary \
+    google-cloud-storage
 
-# mlflow.db monté depuis le host (métadonnées runs/métriques/params)
-# mlruns/ monté depuis le host (artefacts : poids LoRA, rapports...)
-VOLUME ["/mlflow.db", "/mlruns"]
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
 
 EXPOSE 5000
-
-CMD ["mlflow", "ui", \
-     "--backend-store-uri", "sqlite:////mlflow.db", \
-     "--default-artifact-root", "/mlruns", \
-     "--host", "0.0.0.0", \
-     "--port", "5000"]
+ENTRYPOINT ["/start.sh"]

@@ -1,0 +1,12 @@
+# Copier ce fichier en terraform.tfvars et remplir les valeurs
+# NE PAS commiter terraform.tfvars (contient des secrets)
+
+project_id       = "mon-projet-gcp"
+region           = "europe-west1"
+db_instance_name = "mlflow-poc-db"
+db_name          = "mlflow"
+db_user          = "mlflow"
+db_password      = "changeme-mot-de-passe-fort"
+network_name        = "default"
+cloudrun_image_name      = "mlflow"
+authorized_invoker_email = "ton-email@gmail.com"

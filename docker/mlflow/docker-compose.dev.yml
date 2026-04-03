@@ -1,0 +1,20 @@
+services:
+  mlflow:
+    build: .
+    container_name: mlflow-dev
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ../../mlflow.db:/mlflow.db
+      - ../../mlruns:/mlruns
+    environment:
+      MLFLOW_FLASK_SERVER_SECRET_KEY: "dev-secret-key"
+      MLFLOW_SERVER_ALLOWED_HOSTS: "*"
+      MLFLOW_SERVER_CORS_ALLOWED_ORIGINS: "*"
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow.db
+      --default-artifact-root /mlruns
+      --host 0.0.0.0
+      --port 5000

@@ -35,6 +35,7 @@ from transformers import (
 )
 from utils import (
     SYSTEM_PROMPT,
+    check_demo_env,
     extract_urgency_from_response,
     get_logger,
 )
@@ -61,8 +62,20 @@ SEED = 42
 
 URGENCY_LABELS = ["max", "moderate", "deferred"]
 
+# Seuils d'acceptation cliniques — calibrés POC (données de qualité moyenne, modèle 1.7B).
+# Voir specs/EVAL-Metrics-Cliniques.md pour la justification complète.
+CLINICAL_THRESHOLDS: dict[str, float] = {
+    "recall_max": 0.75,  # Rappel classe "max" : rater une urgence critique est inacceptable
+    "f2_macro": 0.60,  # F2 (β=2) pénalise les faux négatifs
+    "format_compliance": 0.70,  # Réponses au format parseable par le workflow clinique
+    "accuracy": 0.60,  # Accuracy globale minimale
+}
+
 MLFLOW_EXPERIMENT = "dpo-qwen3-1.7b-triage"
-MLFLOW_TRACKING_URI = f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
+MLFLOW_TRACKING_URI = os.getenv(
+    "MLFLOW_TRACKING_URI",
+    f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}",
+)
 
 # Regex pour supprimer les artifacts de génération Qwen3 :
 # - ForCanBeConverted, 𫟦, caractères de remplacement Unicode (U+FFFD)
@@ -322,6 +335,15 @@ def evaluate_split(
                 labels=URGENCY_LABELS,
                 zero_division=0,  # type: ignore[reportArgumentType]
             )
+            # Recall par classe — index 0 = "max" (urgence critique, métrique clinique clé)
+            recall_per_class = recall_score(
+                y_true,
+                y_pred,
+                average=None,
+                labels=URGENCY_LABELS,
+                zero_division=0,  # type: ignore[reportArgumentType]
+            )
+            recall_max = float(recall_per_class[0])
             f2_macro = fbeta_score(
                 y_true,
                 y_pred,
@@ -332,7 +354,7 @@ def evaluate_split(
             )
             cm = confusion_matrix(y_true, y_pred, labels=URGENCY_LABELS)
         else:
-            accuracy, f1, recall_macro, f2_macro, cm = 0.0, 0.0, 0.0, 0.0, None
+            accuracy, f1, recall_macro, recall_max, f2_macro, cm = 0.0, 0.0, 0.0, 0.0, 0.0, None
 
         format_compliance = sum(p["format_ok"] for p in predictions) / len(predictions)
         avg_len = sum(len(p["generated_response"].split()) for p in predictions) / len(predictions)
@@ -341,6 +363,7 @@ def evaluate_split(
             "accuracy": round(accuracy, 4),
             "f1_macro": round(f1, 4),
             "recall_macro": round(recall_macro, 4),
+            "recall_max": round(recall_max, 4),
             "f2_macro": round(f2_macro, 4),
             "format_compliance": round(format_compliance, 4),
             "response_length_mean": round(avg_len, 1),
@@ -433,6 +456,70 @@ def compare_responses_on_dpo_val(
     ]
 
 
+def check_clinical_thresholds(
+    metrics: dict,
+    thresholds: dict[str, float] = CLINICAL_THRESHOLDS,
+) -> list[dict]:
+    """Vérifie les métriques cliniques par rapport aux seuils d'acceptation POC.
+
+    Args:
+        metrics: Dict de métriques issu de evaluate_split.
+        thresholds: Dict {nom_metrique: seuil_minimal}. Défaut : CLINICAL_THRESHOLDS.
+
+    Returns:
+        Liste de dicts {criterion, value, threshold, passed}.
+    """
+    return [
+        {
+            "criterion": criterion,
+            "value": float(metrics.get(criterion, 0.0)),
+            "threshold": threshold,
+            "passed": float(metrics.get(criterion, 0.0)) >= threshold,
+        }
+        for criterion, threshold in thresholds.items()
+    ]
+
+
+def _format_clinical_comparison_table(
+    sft_metrics: dict,
+    dpo_metrics: dict,
+    thresholds: dict[str, float] = CLINICAL_THRESHOLDS,
+) -> str:
+    """Génère le tableau Markdown de comparaison clinique SFT vs DPO avec PASS/FAIL.
+
+    Args:
+        sft_metrics: Métriques SFT (test set).
+        dpo_metrics: Métriques DPO (test set).
+        thresholds: Dict {nom_metrique: seuil_minimal}.
+
+    Returns:
+        Tableau Markdown formaté.
+    """
+    _labels = {
+        "recall_max": "Recall URGENCE MAX",
+        "f2_macro": "F2 Macro (β=2)",
+        "format_compliance": "Format Compliance",
+        "accuracy": "Accuracy globale",
+    }
+    _pct_keys = {"recall_max", "format_compliance", "accuracy"}
+    lines = [
+        "| Critère | SFT | DPO | Seuil (POC) | Statut SFT | Statut DPO |",
+        "|---|---|---|---|---|---|",
+    ]
+    for criterion, threshold in thresholds.items():
+        name = _labels.get(criterion, criterion)
+        sv = float(sft_metrics.get(criterion, 0.0))
+        dv = float(dpo_metrics.get(criterion, 0.0))
+        if criterion in _pct_keys:
+            sv_str, dv_str, thr_str = f"{sv:.1%}", f"{dv:.1%}", f"≥ {threshold:.0%}"
+        else:
+            sv_str, dv_str, thr_str = f"{sv:.4f}", f"{dv:.4f}", f"≥ {threshold:.2f}"
+        sft_status = "✅ PASS" if sv >= threshold else "❌ FAIL"
+        dpo_status = "✅ PASS" if dv >= threshold else "❌ FAIL"
+        lines.append(f"| {name} | {sv_str} | {dv_str} | {thr_str} | {sft_status} | {dpo_status} |")
+    return "\n".join(lines)
+
+
 def generate_dpo_eval_report(
     sft_val_metrics: dict | None,
     dpo_val_metrics: dict | None,
@@ -462,6 +549,7 @@ def generate_dpo_eval_report(
                     "accuracy",
                     "f1_macro",
                     "recall_macro",
+                    "recall_max",
                     "f2_macro",
                     "format_compliance",
                     "response_length_mean",
@@ -472,6 +560,7 @@ def generate_dpo_eval_report(
             "accuracy": f"{m['accuracy']:.2%}",
             "f1_macro": f"{m['f1_macro']:.4f}",
             "recall_macro": f"{m['recall_macro']:.4f}",
+            "recall_max": f"{m['recall_max']:.2%}",
             "f2_macro": f"{m['f2_macro']:.4f}",
             "format_compliance": f"{m['format_compliance']:.1%}",
             "response_length_mean": f"{m['response_length_mean']:.0f}",
@@ -533,6 +622,13 @@ def generate_dpo_eval_report(
             + " | "
             + _delta(sft_val_metrics, dpo_val_metrics, "recall_macro")
             + " |\n"
+            "| **Recall URGENCE MAX** | "
+            + sv["recall_max"]
+            + " | "
+            + dv["recall_max"]
+            + " | "
+            + _delta(sft_val_metrics, dpo_val_metrics, "recall_max", pct=True)
+            + " |\n"
             "| F2 Macro (\u03b2=2) | "
             + sv["f2_macro"]
             + " | "
@@ -582,6 +678,13 @@ def generate_dpo_eval_report(
         + dt["recall_macro"]
         + " | "
         + _delta(sft_test_metrics, dpo_test_metrics, "recall_macro")
+        + " |\n"
+        "| **Recall URGENCE MAX** | "
+        + st["recall_max"]
+        + " | "
+        + dt["recall_max"]
+        + " | "
+        + _delta(sft_test_metrics, dpo_test_metrics, "recall_max", pct=True)
         + " |\n"
         "| F2 Macro (\u03b2=2) | "
         + st["f2_macro"]
@@ -660,6 +763,24 @@ def generate_dpo_eval_report(
             "Analyse qualitative nécessaire avant export.\n"
         )
 
+    # Critères cliniques — seuils POC (données de qualité moyenne, modèle 1.7B)
+    clinical_table = _format_clinical_comparison_table(sft_test_metrics, dpo_test_metrics)
+    sft_results = check_clinical_thresholds(sft_test_metrics)
+    dpo_results = check_clinical_thresholds(dpo_test_metrics)
+    n_pass_sft = sum(1 for r in sft_results if r["passed"])
+    n_pass_dpo = sum(1 for r in dpo_results if r["passed"])
+    n_total = len(sft_results)
+    report += (
+        "\n---\n\n## 7. Critères cliniques — Seuils d'acceptation POC\n\n"
+        "> Seuils calibrés pour un POC sur données de qualité moyenne (modèle 1.7B, labels inférés).\n"
+        "> Voir `specs/EVAL-Metrics-Cliniques.md` pour la justification complète.\n\n"
+        + clinical_table
+        + f"\n\n**SFT : {n_pass_sft}/{n_total} critères atteints"
+        + (" — validé.**\n" if n_pass_sft == n_total else ".**\n")
+        + f"**DPO : {n_pass_dpo}/{n_total} critères atteints"
+        + (" — validé.**\n" if n_pass_dpo == n_total else ".**\n")
+    )
+
     return report
 
 
@@ -704,6 +825,7 @@ def main() -> None:
         help="Évalue aussi sur le val set (biaisé — voir note ci-dessous). Désactivé par défaut.",
     )
     args = parser.parse_args()
+    check_demo_env()
 
     logger = get_logger("21_evaluate_dpo", verbose=args.verbose)
 
@@ -795,15 +917,18 @@ def main() -> None:
             "sft_test_accuracy": sft_test["accuracy"],
             "sft_test_f1_macro": sft_test["f1_macro"],
             "sft_test_recall_macro": sft_test["recall_macro"],
+            "sft_test_recall_max": sft_test["recall_max"],
             "sft_test_f2_macro": sft_test["f2_macro"],
             "dpo_test_accuracy": dpo_test["accuracy"],
             "dpo_test_f1_macro": dpo_test["f1_macro"],
             "dpo_test_recall_macro": dpo_test["recall_macro"],
+            "dpo_test_recall_max": dpo_test["recall_max"],
             "dpo_test_f2_macro": dpo_test["f2_macro"],
             "dpo_test_format_compliance": dpo_test["format_compliance"],
             "accuracy_delta": dpo_test["accuracy"] - sft_test["accuracy"],
             "f1_macro_delta": dpo_test["f1_macro"] - sft_test["f1_macro"],
             "recall_macro_delta": dpo_test["recall_macro"] - sft_test["recall_macro"],
+            "recall_max_delta": dpo_test["recall_max"] - sft_test["recall_max"],
             "f2_macro_delta": dpo_test["f2_macro"] - sft_test["f2_macro"],
         }
         if sft_val and dpo_val:
@@ -811,9 +936,11 @@ def main() -> None:
                 {
                     "sft_val_accuracy": sft_val["accuracy"],
                     "sft_val_recall_macro": sft_val["recall_macro"],
+                    "sft_val_recall_max": sft_val["recall_max"],
                     "sft_val_f2_macro": sft_val["f2_macro"],
                     "dpo_val_accuracy": dpo_val["accuracy"],
                     "dpo_val_recall_macro": dpo_val["recall_macro"],
+                    "dpo_val_recall_max": dpo_val["recall_max"],
                     "dpo_val_f2_macro": dpo_val["f2_macro"],
                 }
             )
