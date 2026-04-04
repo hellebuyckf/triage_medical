@@ -74,7 +74,7 @@ jobs:
       - name: Terraform Plan
         run: |
           terraform plan \
-            -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var="project_id=${{ secrets.GCP_PROJECT_ID }}" \
             -var="hf_token=${{ secrets.HF_TOKEN }}" \
             -var="db_password=${{ secrets.DB_PASSWORD }}" \
             -var="mlflow_admin_password=${{ secrets.MLFLOW_ADMIN_PASSWORD }}" \
