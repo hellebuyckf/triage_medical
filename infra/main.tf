@@ -20,9 +20,7 @@ provider "google" {
   region  = var.region
 }
 
-# ─────────────────────────────────────────────
 # Cloud SQL PostgreSQL
-# ─────────────────────────────────────────────
 
 module "cloudsql" {
   source = "./modules/cloudsql"
@@ -36,9 +34,7 @@ module "cloudsql" {
   network_name     = var.network_name
 }
 
-# ─────────────────────────────────────────────
 # Cloud Run — service MLflow
-# ─────────────────────────────────────────────
 
 module "cloudrun" {
   source = "./modules/cloudrun"
@@ -58,20 +54,18 @@ module "cloudrun" {
   mlflow_flask_secret_key = var.mlflow_flask_secret_key
 }
 
-# ─────────────────────────────────────────────
 # GCS Bucket — artefacts MLflow
-# ─────────────────────────────────────────────
 
 resource "google_storage_bucket" "mlflow_artifacts" {
   name          = "${var.project_id}-mlflow-artifacts"
   location      = var.region
-  force_destroy = true  # POC : permet terraform destroy sans vider le bucket
+  force_destroy = true # POC : permet terraform destroy sans vider le bucket
 
   uniform_bucket_level_access = true
 
   lifecycle_rule {
     condition {
-      age = 90  # Supprimer les artefacts de plus de 90 jours (optionnel)
+      age = 90 # Supprimer les artefacts de plus de 90 jours (optionnel)
     }
     action {
       type = "Delete"
