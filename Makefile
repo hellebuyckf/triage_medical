@@ -3,7 +3,7 @@
         sft-errors rebuild-dpo \
         dpo-pipeline dpo-pipeline-hard train-dpo evaluate-dpo export-model push-model \
         push-datasets push-datasets-all \
-        build-api serve-local serve-down serve-restart api-health api-triage \
+        build-api push-api prod-deploy serve-local serve-down serve-restart api-health api-triage \
         alpha-health alpha-triage alpha-url benchmark \
         clean clean-sft clean-dpo clean-all retrain help
 
@@ -207,6 +207,12 @@ push-datasets-all: split
 build-api:
 	docker build -t triage-api:latest .
 
+push-api:
+	$(MAKE) -C infra api-push
+
+prod-deploy:
+	$(MAKE) -C infra prod-deploy
+
 serve-local:
 	docker compose up --build
 
@@ -321,7 +327,9 @@ help:
 	@echo "  make push-datasets HF_USERNAME=<user> HF_PRIVATE=1  — dépôts privés"
 	@echo ""
 	@echo "  API (FastAPI + vLLM)"
-	@echo "  make build-api         — construit l'image Docker API"
+	@echo "  make build-api         — construit l'image Docker API localement"
+	@echo "  make push-api          — build et push l'image API vers Artifact Registry"
+	@echo "  make prod-deploy       — déploie l'architecture complète sur GCP (API + vLLM GPU)"
 	@echo "  make serve-local       — démarre l'API en local (docker compose, port 8080)"
 	@echo "  make serve-down        — arrête l'API (docker compose down)"
 	@echo "  make serve-restart     — redémarre l'API (down + build + up)"

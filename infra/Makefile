@@ -1,7 +1,9 @@
 PROJECT_ID        := oc-p14
 REGION            := europe-west1
 CLOUDRUN_SERVICE  := mlflow
+CLOUDRUN_API      := triage-api
 CLOUDSQL_INSTANCE := mlflow-poc-db
+VLLM_VM           := vllm-server
 
 # Racine du projet (parent de infra/)
 PROJECT_ROOT      := $(realpath $(dir $(lastword $(MAKEFILE_LIST)))..)
@@ -24,12 +26,15 @@ CLOUDRUN_LINES    ?= 100
 
 .DEFAULT_GOAL := help
 
-# Image Cloud Run — Artifact Registry
-AR_IMAGE := $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(CLOUDRUN_SERVICE)/$(CLOUDRUN_SERVICE):latest
+# Images Artifact Registry
+AR_MLFLOW := $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(CLOUDRUN_SERVICE)/$(CLOUDRUN_SERVICE):latest
+AR_API    := $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(CLOUDRUN_API)/$(CLOUDRUN_API):latest
 
 .PHONY: help list start stop \
         cloudrun-status cloudrun-logs cloudrun-url cloudrun-redeploy \
         docker-build docker-push deploy \
+        api-build api-push prod-deploy \
+        vllm-status vllm-logs vllm-ssh \
         mlflow-proxy mlflow-tunnel \
         mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow
 
@@ -37,38 +42,40 @@ help:
 	@echo "Usage: make <target>  (depuis infra/ ou : make -C infra <target>)"
 	@echo ""
 	@echo "  Services GCP"
-	@echo "  list              — état de tous les services (Cloud Run, Cloud SQL, GCS)"
-	@echo "  start             — démarrer Cloud SQL + Cloud Run"
-	@echo "  stop              — arrêter Cloud SQL + Cloud Run (économise les coûts)"
+	@echo "  list              — état de tous les services (Cloud Run, Cloud SQL, GCS, GCE)"
+	@echo "  start             — démarrer Cloud SQL + Cloud Run + vLLM VM"
+	@echo "  stop              — arrêter Cloud SQL + Cloud Run + vLLM VM (économie)"
 	@echo ""
-	@echo "  Déploiement"
+	@echo "  Déploiement (MLflow)"
 	@echo "  deploy            — docker-build + docker-push + terraform apply"
 	@echo "  docker-build      — build l'image Docker MLflow pour Cloud Run"
-	@echo "  docker-push       — push l'image vers Artifact Registry"
+	@echo "  docker-push       — push l'image MLflow vers Artifact Registry"
+	@echo ""
+	@echo "  Déploiement (Prod - FastAPI + vLLM)"
+	@echo "  prod-deploy       — api-build + api-push + terraform apply"
+	@echo "  api-build         — build l'image Docker FastAPI (triage-api)"
+	@echo "  api-push          — push l'image FastAPI vers Artifact Registry"
+	@echo ""
+	@echo "  Inférence (vLLM VM)"
+	@echo "  vllm-status       — état de la VM GPU et du conteneur vLLM"
+	@echo "  vllm-logs         — logs du conteneur vLLM sur la VM"
+	@echo "  vllm-ssh          — connexion SSH à la VM vLLM (via IAP)"
 	@echo ""
 	@echo "  Cloud Run"
 	@echo "  cloudrun-status   — état complet du service (URL, révision, trafic)"
-	@echo "  cloudrun-url      — URL publique du service"
-	@echo "  cloudrun-logs       — 100 dernières lignes de logs"
-	@echo "  cloudrun-logs CLOUDRUN_LINES=200  — nombre de lignes personnalisé"
-	@echo "  cloudrun-redeploy   — force une nouvelle révision (repull image :latest)"
-	@echo "  cloudrun-logs-revision REVISION=<nom>  — logs d'une révision spécifique"
+	@echo "  cloudrun-url      — URL publique du service MLflow"
+	@echo "  cloudrun-logs     — 100 dernières lignes de logs"
+	@echo "  cloudrun-redeploy — force une nouvelle révision (repull image :latest)"
 	@echo ""
 	@echo "  Accès MLflow Cloud Run"
 	@echo "  cloudrun-url      — affiche l'URL publique → ouvrir dans le navigateur"
-	@echo "  (login : admin / mot de passe défini dans terraform.tfvars)"
 	@echo ""
 	@echo "  Accès MLflow local Docker (tunnel SSH depuis le Mac)"
 	@echo "  1. Sur alpha-server : make mlflow-proxy"
 	@echo "  2. Sur le Mac       : make mlflow-tunnel  →  http://localhost:8080"
-	@echo "  mlflow-tunnel SSH_KEY=~/.ssh/id_ed25519   — clé SSH explicite"
 	@echo ""
 	@echo "  MLflow local Docker (ENV=dev)"
 	@echo "  mlflow            — build + démarre le conteneur MLflow"
-	@echo "  mlflow-build      — construit l'image Docker MLflow"
-	@echo "  mlflow-up         — démarre le conteneur (port 5000)"
-	@echo "  mlflow-down       — arrête et supprime le conteneur"
-	@echo "  mlflow-logs       — affiche les logs du conteneur"
 	@echo "  clean-mlflow      — supprime mlruns/ et mlflow.db"
 
 # ─────────────────────────────────────────────
@@ -87,6 +94,11 @@ list:
 		--project=$(PROJECT_ID) \
 		--format="table(name,state,region,databaseVersion,settings.tier)"
 	@echo ""
+	@echo "=== Compute Engine (vLLM) ==="
+	@gcloud compute instances list \
+		--project=$(PROJECT_ID) \
+		--format="table(name,zone,status,machineType,networkInterfaces[0].networkIP:label=INTERNAL_IP)"
+	@echo ""
 	@echo "=== GCS Bucket ==="
 	@gcloud storage buckets list \
 		--project=$(PROJECT_ID) \
@@ -98,17 +110,15 @@ stop:
 		--activation-policy=NEVER \
 		--project=$(PROJECT_ID) \
 		--quiet
-	@echo ">>> Cloud SQL suspendu."
-	@echo ""
-	@echo ">>> Mise à zéro du trafic Cloud Run $(CLOUDRUN_SERVICE)..."
-	@gcloud run services update-traffic $(CLOUDRUN_SERVICE) \
-		--region=$(REGION) \
+	@echo ">>> Arrêt de la VM vLLM $(VLLM_VM)..."
+	@gcloud compute instances stop $(VLLM_VM) \
 		--project=$(PROJECT_ID) \
-		--to-revisions=LATEST=0 \
-		--quiet 2>/dev/null || \
-	echo "    (Cloud Run scale-to-zero actif — aucun trafic entrant ne démarrera d'instance)"
-	@echo ""
-	@echo "Tous les services sont arrêtés."
+		--zone=$(REGION)-a \
+		--quiet
+	@echo ">>> Mise à zéro du trafic Cloud Run..."
+	@gcloud run services update-traffic $(CLOUDRUN_SERVICE) --region=$(REGION) --project=$(PROJECT_ID) --to-revisions=LATEST=0 --quiet 2>/dev/null || true
+	@gcloud run services update-traffic $(CLOUDRUN_API) --region=$(REGION) --project=$(PROJECT_ID) --to-revisions=LATEST=0 --quiet 2>/dev/null || true
+	@echo "Tous les services sont arrêtés (économie active)."
 
 start:
 	@echo ">>> Démarrage de Cloud SQL $(CLOUDSQL_INSTANCE)..."
@@ -116,35 +126,57 @@ start:
 		--activation-policy=ALWAYS \
 		--project=$(PROJECT_ID) \
 		--quiet
-	@echo ">>> Cloud SQL en cours de démarrage (peut prendre ~1 minute)."
-	@echo ""
-	@echo ">>> Restauration du trafic Cloud Run $(CLOUDRUN_SERVICE)..."
-	@gcloud run services update-traffic $(CLOUDRUN_SERVICE) \
-		--region=$(REGION) \
+	@echo ">>> Démarrage de la VM vLLM $(VLLM_VM)..."
+	@gcloud compute instances start $(VLLM_VM) \
 		--project=$(PROJECT_ID) \
-		--to-latest \
+		--zone=$(REGION)-a \
 		--quiet
-	@echo ">>> Cloud Run prêt."
-	@echo ""
+	@echo ">>> Restauration du trafic Cloud Run..."
+	@gcloud run services update-traffic $(CLOUDRUN_SERVICE) --region=$(REGION) --project=$(PROJECT_ID) --to-latest --quiet
+	@gcloud run services update-traffic $(CLOUDRUN_API) --region=$(REGION) --project=$(PROJECT_ID) --to-latest --quiet
 	@echo "Tous les services sont démarrés."
-	@echo ""
-	@echo "URL MLflow : $$(gcloud run services describe $(CLOUDRUN_SERVICE) \
-		--region=$(REGION) \
-		--project=$(PROJECT_ID) \
-		--format='value(status.url)')"
 
 # ─────────────────────────────────────────────
-# Déploiement — build Docker + push + terraform apply
+# Déploiement — MLflow
 # ─────────────────────────────────────────────
 
 docker-build:
-	docker build -t $(AR_IMAGE) $(PROJECT_ROOT)/docker/mlflow/
+	docker build -t $(AR_MLFLOW) $(PROJECT_ROOT)/docker/mlflow/
 
 docker-push: docker-build
-	docker push $(AR_IMAGE)
+	docker push $(AR_MLFLOW)
 
 deploy: docker-push
 	terraform apply
+
+# ─────────────────────────────────────────────
+# Déploiement — Prod (API FastAPI)
+# ─────────────────────────────────────────────
+
+api-build:
+	docker build -t $(AR_API) $(PROJECT_ROOT)/
+
+api-push: api-build
+	docker push $(AR_API)
+
+prod-deploy: api-push
+	terraform apply
+
+# ─────────────────────────────────────────────
+# Inférence — Observabilité VM vLLM
+# ─────────────────────────────────────────────
+
+vllm-status:
+	@echo ">>> Status de l'instance GCE :"
+	@gcloud compute instances describe $(VLLM_VM) --zone=$(REGION)-a --project=$(PROJECT_ID) --format="value(status)"
+	@echo ">>> Status des conteneurs Docker (via SSH IAP) :"
+	@gcloud compute ssh $(VLLM_VM) --zone=$(REGION)-a --project=$(PROJECT_ID) --tunnel-through-iap --command="docker ps"
+
+vllm-logs:
+	@gcloud compute ssh $(VLLM_VM) --zone=$(REGION)-a --project=$(PROJECT_ID) --tunnel-through-iap --command="docker logs -f vllm"
+
+vllm-ssh:
+	gcloud compute ssh $(VLLM_VM) --zone=$(REGION)-a --project=$(PROJECT_ID) --tunnel-through-iap
 
 # ─────────────────────────────────────────────
 # Cloud Run — observabilité
@@ -169,28 +201,12 @@ cloudrun-logs:
 
 cloudrun-redeploy:
 	gcloud run deploy $(CLOUDRUN_SERVICE) \
-	    --image=$(AR_IMAGE) \
+	    --image=$(AR_MLFLOW) \
 	    --region=$(REGION) \
 	    --project=$(PROJECT_ID)
 
-# Logs d'une révision spécifique — utile pour diagnostiquer un échec de démarrage.
-# Usage : make cloudrun-logs-revision REVISION=mlflow-00004-hcg
-REVISION ?=
-cloudrun-logs-revision:
-	@test -n "$(REVISION)" || (echo "Usage: make cloudrun-logs-revision REVISION=<nom>"; exit 1)
-	gcloud logging read \
-	    'resource.type="cloud_run_revision" AND resource.labels.revision_name="$(REVISION)"' \
-	    --project=$(PROJECT_ID) \
-	    --limit=100 \
-	    --order=asc \
-	    --format="value(textPayload)"
-
 # ─────────────────────────────────────────────
 # Accès MLflow Cloud Run
-# mlflow-proxy : à lancer sur alpha-server (étape 1)
-#   Forward Cloud Run → localhost:8080 via gcloud (nécessite gcloud auth).
-# mlflow-tunnel : à lancer depuis le Mac (étape 2)
-#   Forward alpha-server:8080 → localhost:8080 via SSH.
 # ─────────────────────────────────────────────
 
 mlflow-proxy:
@@ -205,7 +221,6 @@ mlflow-tunnel:
 
 # ─────────────────────────────────────────────
 # MLflow local Docker (ENV=dev)
-# Utilise les chemins du projet racine (PROJECT_ROOT) pour les volumes.
 # ─────────────────────────────────────────────
 
 mlflow: mlflow-build mlflow-up
