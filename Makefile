@@ -1,4 +1,4 @@
-.PHONY: all setup lint download build-sft build-dpo anonymize split \
+.PHONY: all setup lint test test-serving download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
         sft-errors rebuild-dpo \
         dpo-pipeline dpo-pipeline-hard train-dpo evaluate-dpo export-model push-model \
@@ -81,8 +81,13 @@ lint:
 	uv run ruff format --check scripts/
 	uv run pyright scripts/
 
-# ── Data Engineering ──────────────────────────────────────────────────────────
+test:
+	$(PYTHON) -m pytest tests/
 
+test-serving:
+	$(PYTHON) -m pytest tests/test_serving.py
+
+# ── Data Engineering ──────────────────────────────────────────────────────────
 data-pipeline: download build-sft build-dpo anonymize split
 
 download:
@@ -275,6 +280,8 @@ help:
 	@echo ""
 	@echo "  Qualité du code"
 	@echo "  make lint              — ruff (linter + format) + pyright (typage)"
+	@echo "  make test              — lance tous les tests unitaires (pytest)"
+	@echo "  make test-serving      — lance les tests de l'API (vLLM mocké)"
 	@echo ""
 	@echo "  Data Engineering"
 	@echo "  make data-pipeline     — pipeline complet data (download → split)"

@@ -74,6 +74,7 @@ select = [
 ignore = [
     "E501", # line too long — handled by formatter
     "E402", # module-level import not at top of file — intentional in scripts using sys.path.insert()
+    "E701", # multiple statements on one line (colon) — allowed for compact one-line if/checks
 ]
 
 [tool.ruff.lint.isort]

@@ -28,7 +28,8 @@ import yaml
 
 # Workaround Unsloth/Qwen3 : forward patches produisent des tenseurs non-contigus.
 # cublasLt gère correctement ce cas, cuBLAS standard crash.
-if torch.cuda.is_available(): torch.backends.cuda.preferred_blas_library("cublaslt")
+if torch.cuda.is_available():
+    torch.backends.cuda.preferred_blas_library("cublaslt")
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
