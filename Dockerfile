@@ -7,7 +7,7 @@
 # Run    : docker compose up   (voir docker-compose.yml)
 # Local  : MODEL_PATH=checkpoints/dpo_merged uvicorn scripts.serving.app:app --port 8080
 
-FROM vllm/vllm-openai:latest
+FROM vllm/vllm-openai:v0.4.2
 
 # Dépendances FastAPI — vLLM + transformers déjà présents dans l'image de base
 RUN pip install --no-cache-dir \

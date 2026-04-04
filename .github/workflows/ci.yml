@@ -72,13 +72,13 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
-          ignore: DL3008,DL3013 # Ignorer les avertissements sur les versions de paquets (standard pour les POC)
+          ignore: DL3007,DL3008,DL3013 # DL3007: latest is okay for POC
 
       - name: Lint MLflow Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: docker/mlflow/Dockerfile
-          ignore: DL3008,DL3013
+          ignore: DL3007,DL3008,DL3013
 
       - name: Check Docker Compose configuration
         run: docker compose config -q
