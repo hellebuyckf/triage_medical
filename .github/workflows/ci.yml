@@ -42,13 +42,22 @@ jobs:
           uv run pytest tests/test_serving.py
 
   terraform-quality:
-    name: Terraform Quality
+    name: Terraform Quality & Plan
     runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
     defaults:
       run:
         working-directory: infra
     steps:
       - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -57,10 +66,19 @@ jobs:
         run: terraform fmt -check -recursive
 
       - name: Terraform Init
-        run: terraform init -backend=false
+        run: terraform init
 
       - name: Terraform Validate
         run: terraform validate
+
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -var="project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            -var="hf_token=${{ secrets.HF_TOKEN }}" \
+            -var="db_password=${{ secrets.DB_PASSWORD }}" \
+            -var="mlflow_admin_password=${{ secrets.MLFLOW_ADMIN_PASSWORD }}" \
+            -var="mlflow_flask_secret_key=${{ secrets.MLFLOW_FLASK_SECRET_KEY }}"
 
   docker-lint:
     name: Docker Lint
