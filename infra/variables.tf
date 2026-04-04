@@ -62,3 +62,16 @@ variable "mlflow_flask_secret_key" {
   type        = string
   sensitive   = true
 }
+
+variable "cloudrun_api_image_name" {
+  description = "Nom du service Cloud Run pour la FastAPI"
+  type        = string
+  default     = "triage-api"
+}
+
+variable "hf_token" {
+  description = "Hugging Face Token pour télécharger le modèle dans la VM"
+  type        = string
+  sensitive   = true
+  default     = ""
+}

@@ -38,3 +38,18 @@ output "cloudrun_service_account" {
   description = "Email du service account Cloud Run MLflow"
   value       = module.cloudrun.service_account_email
 }
+
+output "vllm_internal_ip" {
+  description = "IP interne de la VM vLLM"
+  value       = module.vllm_gce.internal_ip
+}
+
+output "api_service_url" {
+  description = "URL publique de l'API FastAPI"
+  value       = module.cloudrun_api.service_url
+}
+
+output "api_artifact_registry_url" {
+  description = "URL Artifact Registry pour push l'image de l'API FastAPI"
+  value       = module.cloudrun_api.artifact_registry_url
+}

@@ -72,3 +72,26 @@ resource "google_storage_bucket" "mlflow_artifacts" {
     }
   }
 }
+
+# Module Inférence — Compute Engine vLLM (GPU)
+module "vllm_gce" {
+  source = "./modules/vllm_gce"
+
+  project_id   = var.project_id
+  region       = var.region
+  zone         = "${var.region}-a" # Defaulting to zone 'a', could be parameterized
+  network_name = var.network_name
+  hf_token     = var.hf_token
+}
+
+# Module Gateway API — Cloud Run FastAPI
+module "cloudrun_api" {
+  source = "./modules/cloudrun_api"
+
+  project_id        = var.project_id
+  region            = var.region
+  network_name      = var.network_name
+  image_name        = var.cloudrun_api_image_name
+  vllm_api_base_url = "http://${module.vllm_gce.internal_ip}:8000/v1"
+  vllm_api_key      = var.hf_token # Utilisé comme token d'API local dans ce POC
+}
