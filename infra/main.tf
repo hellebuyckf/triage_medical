@@ -8,11 +8,10 @@ terraform {
     }
   }
 
-  # Décommenter pour stocker le state dans GCS
-  # backend "gcs" {
-  #   bucket = "MON_BUCKET_TERRAFORM_STATE"
-  #   prefix = "mlflow/poc"
-  # }
+  backend "gcs" {
+    bucket = "oc-p14-terraform-state"
+    prefix = "terraform/state"
+  }
 }
 
 provider "google" {
