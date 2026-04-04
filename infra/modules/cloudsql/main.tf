@@ -1,4 +1,14 @@
 # ─────────────────────────────────────────────
+# Activation des APIs
+# ─────────────────────────────────────────────
+
+resource "google_project_service" "servicenetworking_api" {
+  project            = var.project_id
+  service            = "servicenetworking.googleapis.com"
+  disable_on_destroy = false
+}
+
+# ─────────────────────────────────────────────
 # VPC Peering — nécessaire pour l'IP privée
 # ─────────────────────────────────────────────
 
@@ -14,6 +24,8 @@ resource "google_service_networking_connection" "private_vpc_connection" {
   network                 = "projects/${var.project_id}/global/networks/${var.network_name}"
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_ip_range.name]
+
+  depends_on = [google_project_service.servicenetworking_api]
 }
 
 # ─────────────────────────────────────────────
