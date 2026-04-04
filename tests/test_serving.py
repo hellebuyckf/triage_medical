@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Ajouter le répertoire scripts au path pour résoudre 'from utils import ...'
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+# Mock vllm avant d'importer l'app
 from unittest.mock import MagicMock, patch
+
+mock_vllm = MagicMock()
+sys.modules["vllm"] = mock_vllm
 
 import pytest
 import pytest_asyncio

@@ -1,0 +1,65 @@
+name: CD - Deploy Serving API
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'scripts/serving/**'
+      - 'scripts/utils.py'
+      - 'Dockerfile'
+      - 'infra/**'
+      - '.github/workflows/cd.yml'
+
+jobs:
+  deploy:
+    name: Build, Push and Deploy
+    runs-on: ubuntu-latest
+    
+    # Permission nécessaire pour Workload Identity Federation (recommandé par GCP)
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          # Utiliser Workload Identity Federation (WIF) pour plus de sécurité.
+          # Nécessite de configurer un Workload Identity Pool sur GCP.
+          # Si vous préférez une clé de Service Account (moins sécure),
+          # remplacez par credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Build and Push API Image
+        run: |
+          # Utilise le Makefile pour garder la cohérence avec le dev local
+          make push-api PROJECT_ID=${{ vars.GCP_PROJECT_ID }}
+
+      - name: Terraform Apply
+        working-directory: infra
+        run: |
+          # Initialisation avec le backend (probablement GCS pour la CD)
+          # Note : Assurez-vous que le backend est configuré dans main.tf
+          terraform init
+          
+          # Apply avec les variables sensibles issues des secrets GitHub
+          terraform apply -auto-approve \
+            -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var="hf_token=${{ secrets.HF_TOKEN }}" \
+            -var="db_password=${{ secrets.DB_PASSWORD }}" \
+            -var="mlflow_admin_password=${{ secrets.MLFLOW_ADMIN_PASSWORD }}" \
+            -var="mlflow_flask_secret_key=${{ secrets.MLFLOW_FLASK_SECRET_KEY }}"

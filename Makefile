@@ -1,13 +1,16 @@
-.PHONY: all setup lint download build-sft build-dpo anonymize split \
+.PHONY: all setup lint test test-serving download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
         sft-errors rebuild-dpo \
         dpo-pipeline dpo-pipeline-hard train-dpo evaluate-dpo export-model push-model \
         push-datasets push-datasets-all \
-        build-api serve-local serve-down serve-restart api-health api-triage \
+        build-api push-api prod-deploy serve-local serve-down serve-restart api-health api-triage \
         alpha-health alpha-triage alpha-url benchmark \
         clean clean-sft clean-dpo clean-all retrain help
 
 # Variables
+-include .env
+export
+
 PYTHON          = uv run python
 DATA_PREP       = scripts/data_prep
 TRAINING        = scripts/training
@@ -78,8 +81,13 @@ lint:
 	uv run ruff format --check scripts/
 	uv run pyright scripts/
 
-# ── Data Engineering ──────────────────────────────────────────────────────────
+test:
+	$(PYTHON) -m pytest tests/
 
+test-serving:
+	$(PYTHON) -m pytest tests/test_serving.py
+
+# ── Data Engineering ──────────────────────────────────────────────────────────
 data-pipeline: download build-sft build-dpo anonymize split
 
 download:
@@ -158,6 +166,14 @@ push-model: export-model
 		--repo-id $(HF_USERNAME)/qwen3-triage-dpo \
 		--skip-verify
 
+upload-model:
+	@if [ -z "$(HF_USERNAME)" ]; then \
+		echo "Erreur : HF_USERNAME non défini."; \
+		echo "Usage  : make upload-model HF_USERNAME=<votre_username>"; \
+		exit 1; \
+	fi
+	uv run huggingface-cli upload $(HF_USERNAME)/qwen3-triage-dpo ./checkpoints/dpo_merged/
+
 # ── HuggingFace Hub ───────────────────────────────────────────────────────────
 
 push-datasets: split
@@ -190,6 +206,12 @@ push-datasets-all: split
 
 build-api:
 	docker build -t triage-api:latest .
+
+push-api:
+	$(MAKE) -C infra api-push
+
+prod-deploy:
+	$(MAKE) -C infra prod-deploy
 
 serve-local:
 	docker compose up --build
@@ -264,6 +286,8 @@ help:
 	@echo ""
 	@echo "  Qualité du code"
 	@echo "  make lint              — ruff (linter + format) + pyright (typage)"
+	@echo "  make test              — lance tous les tests unitaires (pytest)"
+	@echo "  make test-serving      — lance les tests de l'API (vLLM mocké)"
 	@echo ""
 	@echo "  Data Engineering"
 	@echo "  make data-pipeline     — pipeline complet data (download → split)"
@@ -297,12 +321,15 @@ help:
 	@echo ""
 	@echo "  HuggingFace Hub"
 	@echo "  make push-model HF_USERNAME=<user>         — push modèle fusionné (username/qwen3-triage-dpo)"
+	@echo "  make upload-model HF_USERNAME=<user>       — upload le modèle déjà fusionné (compatible Mac)"
 	@echo "  make push-datasets HF_USERNAME=<user>      — publie sft + dpo finaux (DatasetDict)"
 	@echo "  make push-datasets-all HF_USERNAME=<user>  — idem + datasets intermédiaires"
 	@echo "  make push-datasets HF_USERNAME=<user> HF_PRIVATE=1  — dépôts privés"
 	@echo ""
 	@echo "  API (FastAPI + vLLM)"
-	@echo "  make build-api         — construit l'image Docker API"
+	@echo "  make build-api         — construit l'image Docker API localement"
+	@echo "  make push-api          — build et push l'image API vers Artifact Registry"
+	@echo "  make prod-deploy       — déploie l'architecture complète sur GCP (API + vLLM GPU)"
 	@echo "  make serve-local       — démarre l'API en local (docker compose, port 8080)"
 	@echo "  make serve-down        — arrête l'API (docker compose down)"
 	@echo "  make serve-restart     — redémarre l'API (down + build + up)"

@@ -14,7 +14,8 @@ from pathlib import Path
 
 import torch
 
-torch.backends.cuda.preferred_blas_library("cublaslt")
+if torch.cuda.is_available():
+    torch.backends.cuda.preferred_blas_library("cublaslt")
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:

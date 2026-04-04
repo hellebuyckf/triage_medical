@@ -1,8 +1,10 @@
 {
   "pythonVersion": "3.11",
-  "include": ["scripts"],
+  "include": ["scripts", "tests"],
   "typeCheckingMode": "standard",
   "reportMissingImports": false,
   "reportMissingModuleSource": false,
-  "reportPrivateImportUsage": false
+  "reportPrivateImportUsage": false,
+  "reportArgumentType": false,
+  "reportIndexIssue": false
 }
