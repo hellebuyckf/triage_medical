@@ -79,7 +79,7 @@ module "vllm_gce" {
 
   project_id   = var.project_id
   region       = var.region
-  zone         = "${var.region}-a" # Defaulting to zone 'a', could be parameterized
+  zone         = "${var.region}-b" # Better availability for L4 GPUs in zone 'b'
   network_name = var.network_name
   hf_token     = var.hf_token
 }
