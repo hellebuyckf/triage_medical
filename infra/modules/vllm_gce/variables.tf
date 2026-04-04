@@ -27,5 +27,5 @@ variable "hf_token" {
 variable "model_id" {
   description = "HF Model ID to run"
   type        = string
-  default     = "project14/qwen3-1.7b-triage-medical"
+  default     = "FrancoisFormation/qwen3-triage-dpo"
 }
