@@ -135,6 +135,7 @@ resource "google_compute_instance" "vllm" {
       --model "${var.model_id}" \
       --max-model-len 4096 \
       --dtype auto \
+      --trust-remote-code \
       --api-key "${var.hf_token}" # Using hf_token as API key for simplicity in POC
   EOT
 
