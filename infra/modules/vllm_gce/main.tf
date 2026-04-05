@@ -89,7 +89,29 @@ resource "google_compute_instance" "vllm" {
   metadata_startup_script = <<-EOT
     #!/bin/bash
     echo "Starting vLLM Setup"
-    
+
+    # Install Docker if not present
+    if ! command -v docker &> /dev/null; then
+      echo "Installing Docker..."
+      curl -fsSL https://get.docker.com -o get-docker.sh
+      sh get-docker.sh
+      systemctl enable docker
+      systemctl start docker
+    fi
+
+    # Install NVIDIA Container Toolkit
+    echo "Installing/Configuring NVIDIA Container Toolkit..."
+    if ! dpkg -l | grep -q nvidia-container-toolkit; then
+      curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+      curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+      sudo apt-get update
+      sudo apt-get install -y nvidia-container-toolkit
+    fi
+    sudo nvidia-ctk runtime configure --runtime=docker
+    sudo systemctl restart docker
+
     # Wait for NVIDIA drivers to be ready
     for i in {1..30}; do
       if nvidia-smi; then
@@ -102,6 +124,7 @@ resource "google_compute_instance" "vllm" {
 
     # Run vLLM Docker container
     # Exposing on port 8000
+    # Overriding entrypoint to force-upgrade transformers for Qwen3 support (requires transformers >= 4.51.0)
     docker run -d --name vllm \
       --runtime nvidia --gpus all \
       -v /var/lib/vllm/cache:/root/.cache/huggingface \
@@ -109,11 +132,9 @@ resource "google_compute_instance" "vllm" {
       --ipc=host \
       --restart unless-stopped \
       -e HF_TOKEN="${var.hf_token}" \
-      vllm/vllm-openai:v0.4.2 \
-      --model "${var.model_id}" \
-      --max-model-len 4096 \
-      --dtype auto \
-      --api-key "${var.hf_token}" # Using hf_token as API key for simplicity in POC
+      --entrypoint /bin/bash \
+      vllm/vllm-openai:latest \
+      -c "pip install --no-cache-dir -U transformers && python3 -m vllm.entrypoints.openai.api_server --model ${var.model_id} --max-model-len 4096 --dtype auto --trust-remote-code"
   EOT
 
   depends_on = [google_project_service.compute_api]

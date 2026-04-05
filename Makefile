@@ -231,6 +231,22 @@ api-triage:
 	  -d '{"symptoms": "Douleur thoracique intense, sudation, nausées depuis 30 minutes."}' \
 	  | python3 -m json.tool
 
+# Cibles GCP — interroge l'API déployée sur Cloud Run
+gcp-url:
+	@gcloud run services describe triage-api --region=europe-west1 --project=oc-p14 --format='value(status.url)'
+
+gcp-health:
+	@url=$$(gcloud run services describe triage-api --region=europe-west1 --project=oc-p14 --format='value(status.url)'); \
+	echo "Interrogation de $$url/health..."; \
+	curl -s $$url/health | python3 -m json.tool
+
+gcp-triage:
+	@url=$$(gcloud run services describe triage-api --region=europe-west1 --project=oc-p14 --format='value(status.url)'); \
+	curl -s -X POST $$url/triage \
+	  -H "Content-Type: application/json" \
+	  -d '{"symptoms": "Douleur thoracique intense, sudation, nausées depuis 30 minutes."}' \
+	  | python3 -m json.tool
+
 # Cibles alpha — interroge le serveur directement via Tailscale (sans tunnel SSH)
 alpha-health:
 	curl -s http://$(ALPHA_HOST):8080/health | python3 -m json.tool

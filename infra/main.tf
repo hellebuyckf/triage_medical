@@ -81,6 +81,7 @@ module "vllm_gce" {
   zone         = "europe-west4-c" # Fixed zone for GPU availability (moved from -a due to stockout)
   network_name = var.network_name
   hf_token     = var.hf_token
+  model_id     = var.model_id
 }
 
 # Module Gateway API — Cloud Run FastAPI
@@ -92,6 +93,7 @@ module "cloudrun_api" {
   network_name      = var.network_name
   image_name        = var.cloudrun_api_image_name
   vllm_api_base_url = "http://${module.vllm_gce.internal_ip}:8000/v1"
-  vllm_api_key      = var.hf_token                         # Utilisé comme token d'API local dans ce POC
-  model_id          = "FrancoisFormation/qwen3-triage-dpo" # Match GCE config
+  vllm_api_key      = var.hf_token # Utilisé comme token d'API local dans ce POC
+  model_id          = var.model_id # Match GCE config
 }
+
