@@ -124,6 +124,7 @@ resource "google_compute_instance" "vllm" {
 
     # Run vLLM Docker container
     # Exposing on port 8000
+    # Overriding entrypoint to force-upgrade transformers for Qwen3 support (requires transformers >= 4.51.0)
     docker run -d --name vllm \
       --runtime nvidia --gpus all \
       -v /var/lib/vllm/cache:/root/.cache/huggingface \
@@ -131,13 +132,9 @@ resource "google_compute_instance" "vllm" {
       --ipc=host \
       --restart unless-stopped \
       -e HF_TOKEN="${var.hf_token}" \
-      vllm/vllm-openai:v0.7.3 \
-      --model "${var.model_id}" \
-      --max-model-len 4096 \
-      --dtype auto \
-      --trust-remote-code \
-      --additional-config '{"model_type": "qwen2"}' \
-      --api-key "${var.hf_token}" # Using hf_token as API key for simplicity in POC
+      --entrypoint /bin/bash \
+      vllm/vllm-openai:latest \
+      -c "pip install --no-cache-dir -U transformers && python3 -m vllm.entrypoints.openai.api_server --model ${var.model_id} --max-model-len 4096 --dtype auto --trust-remote-code"
   EOT
 
   depends_on = [google_project_service.compute_api]
