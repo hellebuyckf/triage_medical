@@ -14,17 +14,23 @@ variable "network_name" {
 }
 
 variable "image_name" {
-  description = "Nom du service Cloud Run et repository Artifact Registry"
+  description = "Cloud Run service name and Artifact Registry repo name"
   type        = string
 }
 
 variable "vllm_api_base_url" {
-  description = "URL of the vLLM API on the Compute Engine instance"
+  description = "URL of the remote vLLM API"
   type        = string
 }
 
 variable "vllm_api_key" {
-  description = "API Key to authenticate with vLLM"
+  description = "API Key for vLLM"
   type        = string
   sensitive   = true
+}
+
+variable "model_id" {
+  description = "Model ID used by vLLM (must match the one on GCE)"
+  type        = string
+  default     = "FrancoisFormation/qwen3-triage-dpo"
 }

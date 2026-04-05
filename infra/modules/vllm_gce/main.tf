@@ -53,7 +53,7 @@ resource "google_compute_instance" "vllm" {
 
   boot_disk {
     initialize_params {
-      image = "projects/ml-images/global/images/family/common-cu121-debian-11"
+      image = "projects/deeplearning-platform-release/global/images/family/common-cu128-ubuntu-2204-nvidia-570"
       size  = 100
       type  = "pd-ssd"
     }
