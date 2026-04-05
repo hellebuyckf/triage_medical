@@ -2,6 +2,8 @@
 
 Voici 5 cas typiques couvrant les trois niveaux d'urgence (`max`, `moderate`, `deferred`) pour tester la robustesse de l'API.
 
+> **💡 Note :** Les commandes ci-dessous sont sur une seule ligne pour faciliter le copier-coller.
+
 ## 1. Urgence Vitale (Cardiaque)
 **Symptômes :** "Douleur thoracique brutale, comme un étau, qui irradie dans le bras gauche et la mâchoire. J'ai du mal à respirer et je suis couvert de sueurs froides depuis 10 minutes."
 **Commande :**
