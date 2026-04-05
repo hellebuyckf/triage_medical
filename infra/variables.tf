@@ -75,3 +75,9 @@ variable "hf_token" {
   sensitive   = true
   default     = ""
 }
+
+variable "model_id" {
+  description = "Model ID to run"
+  type        = string
+  default     = "FrancoisFormation/qwen3-triage-dpo"
+}
