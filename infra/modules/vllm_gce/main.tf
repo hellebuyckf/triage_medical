@@ -99,6 +99,19 @@ resource "google_compute_instance" "vllm" {
       systemctl start docker
     fi
 
+    # Install NVIDIA Container Toolkit
+    if ! dpkg -l | grep -q nvidia-container-toolkit; then
+      echo "Installing NVIDIA Container Toolkit..."
+      curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+      curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+      sudo apt-get update
+      sudo apt-get install -y nvidia-container-toolkit
+      sudo nvidia-ctk runtime configure --runtime=docker
+      sudo systemctl restart docker
+    fi
+
     # Wait for NVIDIA drivers to be ready
     for i in {1..30}; do
       if nvidia-smi; then
