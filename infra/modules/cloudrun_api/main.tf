@@ -94,6 +94,10 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "VLLM_API_KEY"
         value = var.vllm_api_key
       }
+      env {
+        name  = "MODEL_PATH"
+        value = var.model_id
+      }
 
       resources {
         limits = {

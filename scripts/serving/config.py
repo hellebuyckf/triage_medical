@@ -33,4 +33,8 @@ class ServerConfig(BaseSettings):
     port: int = 8080
     log_level: str = "info"
 
+    # Gateway Mode (Cloud Run -> Compute Engine vLLM)
+    vllm_api_base_url: str | None = None
+    vllm_api_key: str | None = None
+
     model_config = {"env_file": ".env", "extra": "ignore"}

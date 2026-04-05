@@ -13,7 +13,10 @@ FROM vllm/vllm-openai:v0.4.2
 RUN pip install --no-cache-dir \
     fastapi>=0.111 \
     "uvicorn[standard]>=0.29" \
-    "pydantic-settings>=2.2"
+    "pydantic-settings>=2.2" \
+    httpx>=0.27 \
+    loguru>=0.7 \
+    pyyaml>=6.0
 
 WORKDIR /app
 
