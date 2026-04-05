@@ -131,7 +131,7 @@ resource "google_compute_instance" "vllm" {
       --ipc=host \
       --restart unless-stopped \
       -e HF_TOKEN="${var.hf_token}" \
-      vllm/vllm-openai:v0.4.2 \
+      vllm/vllm-openai:v0.7.3 \
       --model "${var.model_id}" \
       --max-model-len 4096 \
       --dtype auto \
