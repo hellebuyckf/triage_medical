@@ -113,7 +113,7 @@ stop:
 	@echo ">>> Arrêt de la VM vLLM $(VLLM_VM)..."
 	@gcloud compute instances stop $(VLLM_VM) \
 		--project=$(PROJECT_ID) \
-		--zone=$(REGION)-b \
+		--zone=europe-west4-c \
 		--quiet
 	@echo ">>> Mise à zéro du trafic Cloud Run..."
 	@gcloud run services update-traffic $(CLOUDRUN_SERVICE) --region=$(REGION) --project=$(PROJECT_ID) --to-revisions=LATEST=0 --quiet 2>/dev/null || true
@@ -129,7 +129,7 @@ start:
 	@echo ">>> Démarrage de la VM vLLM $(VLLM_VM)..."
 	@gcloud compute instances start $(VLLM_VM) \
 		--project=$(PROJECT_ID) \
-		--zone=$(REGION)-b \
+		--zone=europe-west4-c \
 		--quiet
 	@echo ">>> Restauration du trafic Cloud Run..."
 	@gcloud run services update-traffic $(CLOUDRUN_SERVICE) --region=$(REGION) --project=$(PROJECT_ID) --to-latest --quiet
@@ -168,15 +168,15 @@ prod-deploy: api-push
 
 vllm-status:
 	@echo ">>> Status de l'instance GCE :"
-	@gcloud compute instances describe $(VLLM_VM) --zone=$(REGION)-b --project=$(PROJECT_ID) --format="value(status)"
+	@gcloud compute instances describe $(VLLM_VM) --zone=europe-west4-c --project=$(PROJECT_ID) --format="value(status)"
 	@echo ">>> Status des conteneurs Docker (via SSH IAP) :"
-	@gcloud compute ssh $(VLLM_VM) --zone=$(REGION)-b --project=$(PROJECT_ID) --tunnel-through-iap --command="docker ps"
+	@gcloud compute ssh $(VLLM_VM) --zone=europe-west4-c --project=$(PROJECT_ID) --tunnel-through-iap --command="docker ps"
 
 vllm-logs:
-	@gcloud compute ssh $(VLLM_VM) --zone=$(REGION)-b --project=$(PROJECT_ID) --tunnel-through-iap --command="docker logs -f vllm"
+	@gcloud compute ssh $(VLLM_VM) --zone=europe-west4-c --project=$(PROJECT_ID) --tunnel-through-iap --command="docker logs -f vllm"
 
 vllm-ssh:
-	gcloud compute ssh $(VLLM_VM) --zone=$(REGION)-b --project=$(PROJECT_ID) --tunnel-through-iap
+	gcloud compute ssh $(VLLM_VM) --zone=europe-west4-c --project=$(PROJECT_ID) --tunnel-through-iap
 
 # ─────────────────────────────────────────────
 # Cloud Run — observabilité

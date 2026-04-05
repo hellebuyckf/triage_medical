@@ -89,7 +89,16 @@ resource "google_compute_instance" "vllm" {
   metadata_startup_script = <<-EOT
     #!/bin/bash
     echo "Starting vLLM Setup"
-    
+
+    # Install Docker if not present
+    if ! command -v docker &> /dev/null; then
+      echo "Installing Docker..."
+      curl -fsSL https://get.docker.com -o get-docker.sh
+      sh get-docker.sh
+      systemctl enable docker
+      systemctl start docker
+    fi
+
     # Wait for NVIDIA drivers to be ready
     for i in {1..30}; do
       if nvidia-smi; then
