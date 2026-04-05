@@ -18,8 +18,8 @@ from serving.config import ServerConfig
 from serving.models import TriageRequest, TriageResponse
 
 if TYPE_CHECKING:
-    from vllm import AsyncLLMEngine
     from transformers import AutoTokenizer  # type: ignore[type-arg]
+    from vllm import AsyncLLMEngine
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -92,19 +92,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         base_url = config.vllm_api_base_url
         if not base_url.endswith("/"):
             base_url += "/"
-            
+
         logger.info("Mode GATEWAY activé (vLLM distant: {})", base_url)
         http_client = httpx.AsyncClient(
             base_url=base_url,
-            headers={"Authorization": f"Bearer {config.vllm_api_key}"} if config.vllm_api_key else {},
+            headers={"Authorization": f"Bearer {config.vllm_api_key}"}
+            if config.vllm_api_key
+            else {},
             timeout=60.0,
         )
         # Tokenizer optionnel pour le gateway (utilisé pour apply_chat_template si besoin)
         # mais on peut s'en passer si on utilise l'API /chat/completions de vLLM.
     else:
         # ── Mode LOCAL (vLLM embarqué) ──
+        from transformers import AutoTokenizer  # import tardif
         from vllm import AsyncEngineArgs, AsyncLLMEngine  # import tardif — vLLM lourd
-        from transformers import AutoTokenizer # import tardif
 
         logger.info("Mode LOCAL activé (vLLM embarqué)")
         logger.info("Chargement du tokenizer depuis {}...", config.model_path)
@@ -132,7 +134,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if http_client:
         await http_client.aclose()
         http_client = None
-    
+
     logger.info("Arrêt du serveur.")
     engine = None
     tokenizer = None
@@ -176,7 +178,7 @@ async def health() -> dict[str, str]:
         status = "ok" if engine is not None else "loading"
         mode = "local"
         target = config.model_path
-        
+
     return {"status": status, "mode": mode, "target": target}
 
 
@@ -197,11 +199,11 @@ async def triage(request: TriageRequest) -> TriageResponse:
         # ── Inférence via GATEWAY (vLLM OpenAI API) ──
         if http_client is None:
             raise HTTPException(status_code=503, detail="Client Gateway non initialisé.")
-        
+
         try:
             # vLLM-OpenAI supporte /v1/chat/completions
             resp = await http_client.post(
-                "chat/completions", # Chemin relatif
+                "chat/completions",  # Chemin relatif
                 json={
                     "model": config.model_path,
                     "messages": [
@@ -210,15 +212,17 @@ async def triage(request: TriageRequest) -> TriageResponse:
                     ],
                     "temperature": config.temperature,
                     "max_tokens": config.max_new_tokens,
-                    "stop": ["<|im_end|>"]
-                }
+                    "stop": ["<|im_end|>"],
+                },
             )
             resp.raise_for_status()
             data = resp.json()
             raw_response = data["choices"][0]["message"]["content"]
         except Exception as e:
             logger.error("Erreur Gateway: {}", e)
-            raise HTTPException(status_code=502, detail=f"Erreur de communication avec vLLM: {e!s}")
+            raise HTTPException(
+                status_code=502, detail=f"Erreur de communication avec vLLM: {e!s}"
+            ) from e
 
     else:
         # ── Inférence via LOCAL vLLM ──
