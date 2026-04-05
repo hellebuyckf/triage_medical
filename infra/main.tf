@@ -77,8 +77,8 @@ module "vllm_gce" {
   source = "./modules/vllm_gce"
 
   project_id   = var.project_id
-  region       = "europe-west4"    # Fixed region for GPU availability
-  zone         = "europe-west4-c"  # Fixed zone for GPU availability (moved from -a due to stockout)
+  region       = "europe-west4"   # Fixed region for GPU availability
+  zone         = "europe-west4-c" # Fixed zone for GPU availability (moved from -a due to stockout)
   network_name = var.network_name
   hf_token     = var.hf_token
   model_id     = var.model_id
