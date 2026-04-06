@@ -250,7 +250,7 @@ gcp-triage:
 	  | python3 -m json.tool
 
 gcp-triage-pretty:
-	@$(MAKE) -s gcp-triage | gemini --approval-mode plan -p "Tu es un assistant de visualisation de données médicales. Reçois le JSON suivant et transforme-le en un rapport Markdown élégant et lisible. Règles : 1. Titre H1 pour urgency_label en gras. 2. Supprime les balises <think>. 3. latency_ms en badge en bas. 4. Ligne de séparation avant disclaimer. 5. PAS de numéros de ligne. Format : Plain text Markdown." | glow
+	@$(MAKE) -s gcp-triage | gemini --approval-mode plan -p "Tu es un assistant de visualisation de données médicales. Reçois le JSON suivant et transforme-le en un rapport Markdown élégant et lisible. Règles : 1. Titre H1 pour urgency_label en gras. 2. Supprime les balises <think>. 3. latency_ms en badge en bas. 4. Ligne de séparation avant disclaimer. 5. PAS de numéros de ligne. Format : Plain text Markdown." 2>/dev/null | glow
 
 # Cibles alpha — interroge le serveur directement via Tailscale (sans tunnel SSH)
 alpha-health:
