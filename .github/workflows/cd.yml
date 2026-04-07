@@ -1,0 +1,72 @@
+name: CD - Deploy Serving API
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'scripts/serving/**'
+      - 'scripts/utils.py'
+      - 'Dockerfile'
+      - 'infra/**'
+      - '.github/workflows/cd.yml'
+
+jobs:
+  deploy:
+    name: Build, Push and Deploy
+    runs-on: ubuntu-latest
+    
+    # Permission nécessaire pour Workload Identity Federation (recommandé par GCP)
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          # Utiliser Workload Identity Federation (WIF) pour plus de sécurité.
+          # Nécessite de configurer un Workload Identity Pool sur GCP.
+          # Si vous préférez une clé de Service Account (moins sécure),
+          # remplacez par credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Bootstrap (Create Artifact Registry)
+        working-directory: infra
+        run: |
+          terraform init
+          # On crée uniquement le repository Artifact Registry pour permettre le push
+          terraform apply -auto-approve \
+            -target=module.cloudrun_api.google_artifact_registry_repository.api_repo \
+            -var="project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            -var="hf_token=${{ secrets.HF_TOKEN }}" \
+            -var="db_password=${{ secrets.DB_PASSWORD }}" \
+            -var="mlflow_admin_password=${{ secrets.MLFLOW_ADMIN_PASSWORD }}" \
+            -var="mlflow_flask_secret_key=${{ secrets.MLFLOW_FLASK_SECRET_KEY }}"
+
+      - name: Build and Push API Image
+        run: |
+          make push-api PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Terraform Apply (Full Deployment)
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve \
+            -var="project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            -var="hf_token=${{ secrets.HF_TOKEN }}" \
+            -var="db_password=${{ secrets.DB_PASSWORD }}" \
+            -var="mlflow_admin_password=${{ secrets.MLFLOW_ADMIN_PASSWORD }}" \
+            -var="mlflow_flask_secret_key=${{ secrets.MLFLOW_FLASK_SECRET_KEY }}"

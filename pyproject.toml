@@ -1,7 +1,7 @@
 [project]
 name = "project14"
 version = "0.2.0"
-requires-python = ">=3.11"
+requires-python = ">=3.11, <3.14"
 dependencies = [
     # S1 — Data Engineering
     "datasets>=2.19",
@@ -28,14 +28,27 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0",
     "loguru>=0.7",
-    "cupy-cuda12x>=14.0.1",
+    "cupy-cuda12x>=14.0.1; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
+gcp = [
+    # Required by MLflow to upload/download artifacts from GCS (ENV=demo).
+    "google-cloud-storage>=2.16",
+]
+serving = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "vllm>=0.4.2",
+    "pydantic-settings>=2.2",
+]
 dev = [
     "ruff>=0.4",
     "pyright>=1.1",
     "pre-commit>=3.7",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
 ]
 
 [build-system]
@@ -61,6 +74,7 @@ select = [
 ignore = [
     "E501", # line too long — handled by formatter
     "E402", # module-level import not at top of file — intentional in scripts using sys.path.insert()
+    "E701", # multiple statements on one line (colon) — allowed for compact one-line if/checks
 ]
 
 [tool.ruff.lint.isort]

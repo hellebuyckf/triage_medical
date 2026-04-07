@@ -1,0 +1,35 @@
+# docker-compose.demo.yml
+#
+# Usage : test local de l'image avant push sur Cloud Run.
+# Sur Cloud Run, GOOGLE_APPLICATION_CREDENTIALS n'est pas nécessaire
+# (le service account attaché au service suffit via ADC).
+#
+# Prérequis locaux :
+#   gcloud auth application-default login
+#
+# Variables requises dans ../../.env.demo :
+#   DB_USER, DB_PASSWORD, DB_HOST, DB_NAME, ARTIFACT_ROOT
+
+services:
+  mlflow:
+    build: .
+    image: mlflow-demo:latest
+    container_name: mlflow-demo
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - ../../.env.demo
+    volumes:
+      # Monte les credentials ADC générés par `gcloud auth application-default login`
+      - ${HOME}/.config/gcloud/application_default_credentials.json:/tmp/adc.json:ro
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /tmp/adc.json
+      MLFLOW_SERVER_ALLOWED_HOSTS: "*"
+      MLFLOW_SERVER_CORS_ALLOWED_ORIGINS: "*"
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}
+      --default-artifact-root ${ARTIFACT_ROOT}
+      --host 0.0.0.0
+      --port 5000

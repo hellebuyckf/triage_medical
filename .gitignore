@@ -197,6 +197,17 @@ unsloth_compiled_cache/
 # Evaluation reports
 reports/
 
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!*.tfvars.example
+
 # Environment files
 .env.demo
 .env.mlflow
+
+# Submodules (if tracked locally but should be excluded)
+# specs/ # (Note: normallement suivi, mais ignoré dans la version distante)

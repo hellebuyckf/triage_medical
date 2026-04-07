@@ -1,13 +1,16 @@
-.PHONY: all setup lint download build-sft build-dpo anonymize split \
+.PHONY: all setup lint test test-serving download build-sft build-dpo anonymize split \
         prepare-tokenizer train-sft evaluate-sft sft-pipeline \
         sft-errors rebuild-dpo \
         dpo-pipeline dpo-pipeline-hard train-dpo evaluate-dpo export-model push-model \
         push-datasets push-datasets-all \
-        build-api serve-local serve-down serve-restart api-health api-triage \
+        build-api push-api prod-deploy serve-local serve-down serve-restart api-health api-triage \
         alpha-health alpha-triage alpha-url benchmark \
         clean clean-sft clean-dpo clean-all retrain help
 
 # Variables
+-include .env
+export
+
 PYTHON          = uv run python
 DATA_PREP       = scripts/data_prep
 TRAINING        = scripts/training
@@ -23,10 +26,7 @@ MLFLOW_TRACKING_URI := $(shell \
 # Variables d'env injectées dans les cibles d'entraînement.
 # demo : ajoute un Identity Token Google Cloud (expire après 1h, régénéré automatiquement).
 ifeq ($(ENV),demo)
-MLFLOW_TRACKING_USERNAME := $(shell grep '^MLFLOW_TRACKING_USERNAME=' .env.$(ENV) 2>/dev/null | head -1 | cut -d'=' -f2-)
-MLFLOW_TRACKING_PASSWORD := $(shell grep '^MLFLOW_TRACKING_PASSWORD=' .env.$(ENV) 2>/dev/null | head -1 | cut -d'=' -f2-)
-GOOGLE_CLOUD_PROJECT     := $(shell grep '^GOOGLE_CLOUD_PROJECT=' .env.$(ENV) 2>/dev/null | head -1 | cut -d'=' -f2-)
-_MLFLOW_ENVVARS = MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)" MLFLOW_TRACKING_USERNAME="$(MLFLOW_TRACKING_USERNAME)" MLFLOW_TRACKING_PASSWORD="$(MLFLOW_TRACKING_PASSWORD)" GOOGLE_CLOUD_PROJECT="$(GOOGLE_CLOUD_PROJECT)"
+_MLFLOW_ENVVARS = MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)" MLFLOW_TRACKING_TOKEN="$$(gcloud auth print-identity-token)"
 # En mode demo, google-cloud-storage est requis pour les artefacts GCS.
 # setup-gcp est ajouté comme prérequis automatique des cibles d'entraînement/évaluation.
 _GCP_PREREQ     = setup-gcp
@@ -81,8 +81,13 @@ lint:
 	uv run ruff format --check scripts/
 	uv run pyright scripts/
 
-# ── Data Engineering ──────────────────────────────────────────────────────────
+test:
+	$(PYTHON) -m pytest tests/
 
+test-serving:
+	$(PYTHON) -m pytest tests/test_serving.py
+
+# ── Data Engineering ──────────────────────────────────────────────────────────
 data-pipeline: download build-sft build-dpo anonymize split
 
 download:
@@ -161,6 +166,14 @@ push-model: export-model
 		--repo-id $(HF_USERNAME)/qwen3-triage-dpo \
 		--skip-verify
 
+upload-model:
+	@if [ -z "$(HF_USERNAME)" ]; then \
+		echo "Erreur : HF_USERNAME non défini."; \
+		echo "Usage  : make upload-model HF_USERNAME=<votre_username>"; \
+		exit 1; \
+	fi
+	uv run huggingface-cli upload $(HF_USERNAME)/qwen3-triage-dpo ./checkpoints/dpo_merged/
+
 # ── HuggingFace Hub ───────────────────────────────────────────────────────────
 
 push-datasets: split
@@ -194,6 +207,12 @@ push-datasets-all: split
 build-api:
 	docker build -t triage-api:latest .
 
+push-api:
+	$(MAKE) -C infra api-push
+
+prod-deploy:
+	$(MAKE) -C infra prod-deploy
+
 serve-local:
 	docker compose up --build
 
@@ -211,6 +230,27 @@ api-triage:
 	  -H "Content-Type: application/json" \
 	  -d '{"symptoms": "Douleur thoracique intense, sudation, nausées depuis 30 minutes."}' \
 	  | python3 -m json.tool
+
+# Cibles GCP — interroge l'API déployée sur Cloud Run
+SYMPTOMS ?= "Douleur thoracique intense, sudation, nausées depuis 30 minutes."
+
+gcp-url:
+	@gcloud run services describe triage-api --region=europe-west1 --project=oc-p14 --format='value(status.url)'
+
+gcp-health:
+	@url=$$(gcloud run services describe triage-api --region=europe-west1 --project=oc-p14 --format='value(status.url)'); \
+	echo "Interrogation de $$url/health..."; \
+	curl -s $$url/health | python3 -m json.tool
+
+gcp-triage:
+	@url=$$(gcloud run services describe triage-api --region=europe-west1 --project=oc-p14 --format='value(status.url)'); \
+	curl -s -X POST $$url/triage \
+	  -H "Content-Type: application/json" \
+	  -d "{\"symptoms\": \"$(SYMPTOMS)\"}" \
+	  | python3 -m json.tool
+
+gcp-triage-pretty:
+	@$(MAKE) -s gcp-triage | gemini --approval-mode plan -p "Tu es un assistant de visualisation de données médicales. Reçois le JSON suivant et transforme-le en un rapport Markdown élégant et lisible. Règles : 1. Titre H1 pour urgency_label en gras. 2. Supprime les balises <think>. 3. latency_ms en badge en bas. 4. Ligne de séparation avant disclaimer. 5. PAS de numéros de ligne. Format : Plain text Markdown." 2>/dev/null | glow
 
 # Cibles alpha — interroge le serveur directement via Tailscale (sans tunnel SSH)
 alpha-health:
@@ -253,9 +293,9 @@ retrain:
 	@echo "=== Nettoyage des checkpoints SFT et DPO ==="
 	$(MAKE) clean-sft clean-dpo
 	@echo "=== Pipeline SFT (tokenize → train → eval) ==="
-	$(MAKE) sft-pipeline ENV=$(ENV)
+	$(MAKE) sft-pipeline
 	@echo "=== Pipeline DPO (train → eval → export) ==="
-	$(MAKE) dpo-pipeline ENV=$(ENV)
+	$(MAKE) dpo-pipeline
 
 # ── Aide ──────────────────────────────────────────────────────────────────────
 
@@ -267,6 +307,8 @@ help:
 	@echo ""
 	@echo "  Qualité du code"
 	@echo "  make lint              — ruff (linter + format) + pyright (typage)"
+	@echo "  make test              — lance tous les tests unitaires (pytest)"
+	@echo "  make test-serving      — lance les tests de l'API (vLLM mocké)"
 	@echo ""
 	@echo "  Data Engineering"
 	@echo "  make data-pipeline     — pipeline complet data (download → split)"
@@ -300,12 +342,15 @@ help:
 	@echo ""
 	@echo "  HuggingFace Hub"
 	@echo "  make push-model HF_USERNAME=<user>         — push modèle fusionné (username/qwen3-triage-dpo)"
+	@echo "  make upload-model HF_USERNAME=<user>       — upload le modèle déjà fusionné (compatible Mac)"
 	@echo "  make push-datasets HF_USERNAME=<user>      — publie sft + dpo finaux (DatasetDict)"
 	@echo "  make push-datasets-all HF_USERNAME=<user>  — idem + datasets intermédiaires"
 	@echo "  make push-datasets HF_USERNAME=<user> HF_PRIVATE=1  — dépôts privés"
 	@echo ""
 	@echo "  API (FastAPI + vLLM)"
-	@echo "  make build-api         — construit l'image Docker API"
+	@echo "  make build-api         — construit l'image Docker API localement"
+	@echo "  make push-api          — build et push l'image API vers Artifact Registry"
+	@echo "  make prod-deploy       — déploie l'architecture complète sur GCP (API + vLLM GPU)"
 	@echo "  make serve-local       — démarre l'API en local (docker compose, port 8080)"
 	@echo "  make serve-down        — arrête l'API (docker compose down)"
 	@echo "  make serve-restart     — redémarre l'API (down + build + up)"
