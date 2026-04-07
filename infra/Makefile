@@ -34,7 +34,7 @@ AR_API    := $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(CLOUDRUN_API)/$(CLOUDRUN_A
         cloudrun-status cloudrun-logs cloudrun-url cloudrun-redeploy \
         docker-build docker-push deploy \
         api-build api-push prod-deploy \
-        vllm-status vllm-logs vllm-ssh \
+        vllm-start vllm-stop vllm-status vllm-logs vllm-ssh vllm-retry vllm-quotas \
         mlflow-proxy mlflow-tunnel \
         mlflow mlflow-build mlflow-up mlflow-down mlflow-logs clean-mlflow
 
@@ -57,6 +57,9 @@ help:
 	@echo "  api-push          — push l'image FastAPI vers Artifact Registry"
 	@echo ""
 	@echo "  Inférence (vLLM VM)"
+	@echo "  vllm-start        — démarrer uniquement la VM vLLM (GPU)"
+	@echo "  vllm-retry        — tente de démarrer la VM en boucle jusqu'au succès"
+	@echo "  vllm-quotas       — vérifier vos quotas GPU L4 dans la région"
 	@echo "  vllm-status       — état de la VM GPU et du conteneur vLLM"
 	@echo "  vllm-logs         — logs du conteneur vLLM sur la VM"
 	@echo "  vllm-ssh          — connexion SSH à la VM vLLM (via IAP)"
@@ -109,32 +112,32 @@ stop:
 	@gcloud sql instances patch $(CLOUDSQL_INSTANCE) \
 		--activation-policy=NEVER \
 		--project=$(PROJECT_ID) \
-		--quiet
+		--async
 	@echo ">>> Arrêt de la VM vLLM $(VLLM_VM)..."
 	@gcloud compute instances stop $(VLLM_VM) \
 		--project=$(PROJECT_ID) \
 		--zone=europe-west4-c \
-		--quiet
+		--async
 	@echo ">>> Mise à zéro du trafic Cloud Run..."
 	@gcloud run services update-traffic $(CLOUDRUN_SERVICE) --region=$(REGION) --project=$(PROJECT_ID) --to-revisions=LATEST=0 --quiet 2>/dev/null || true
 	@gcloud run services update-traffic $(CLOUDRUN_API) --region=$(REGION) --project=$(PROJECT_ID) --to-revisions=LATEST=0 --quiet 2>/dev/null || true
-	@echo "Tous les services sont arrêtés (économie active)."
+	@echo "Demandes d'arrêt envoyées (certaines opérations sont asynchrones)."
 
 start:
 	@echo ">>> Démarrage de Cloud SQL $(CLOUDSQL_INSTANCE)..."
 	@gcloud sql instances patch $(CLOUDSQL_INSTANCE) \
 		--activation-policy=ALWAYS \
 		--project=$(PROJECT_ID) \
-		--quiet
+		--async
 	@echo ">>> Démarrage de la VM vLLM $(VLLM_VM)..."
 	@gcloud compute instances start $(VLLM_VM) \
 		--project=$(PROJECT_ID) \
 		--zone=europe-west4-c \
-		--quiet
+		--async
 	@echo ">>> Restauration du trafic Cloud Run..."
 	@gcloud run services update-traffic $(CLOUDRUN_SERVICE) --region=$(REGION) --project=$(PROJECT_ID) --to-latest --quiet
 	@gcloud run services update-traffic $(CLOUDRUN_API) --region=$(REGION) --project=$(PROJECT_ID) --to-latest --quiet
-	@echo "Tous les services sont démarrés."
+	@echo "Lancement des services initié (certains démarrages sont asynchrones)."
 
 # ─────────────────────────────────────────────
 # Déploiement — MLflow
@@ -166,11 +169,49 @@ prod-deploy: api-push
 # Inférence — Observabilité VM vLLM
 # ─────────────────────────────────────────────
 
+vllm-start:
+	@echo ">>> Démarrage de la VM vLLM $(VLLM_VM)..."
+	@gcloud compute instances start $(VLLM_VM) \
+		--project=$(PROJECT_ID) \
+		--zone=europe-west4-c \
+		--async
+
+vllm-retry:
+	@echo ">>> Tentatives de démarrage de la VM vLLM $(VLLM_VM) en boucle (toutes les 2 min)..."
+	@while true; do \
+		echo "$$(date +'%H:%M:%S') - Tentative de démarrage..."; \
+		if gcloud compute instances start $(VLLM_VM) --project=$(PROJECT_ID) --zone=europe-west4-c --quiet; then \
+			echo ">>> SUCCÈS : La VM $(VLLM_VM) est démarrée !"; \
+			break; \
+		fi; \
+		echo ">>> ÉCHEC : Toujours pas de stock GPU. Nouvelle tentative dans 2 min (Ctrl+C pour arrêter)..."; \
+		sleep 120; \
+	done
+
+vllm-quotas:
+	@echo ">>> Quotas GPU L4 en europe-west4 :"
+	@gcloud compute regions describe europe-west4 \
+		--project=$(PROJECT_ID) \
+		--format="json" \
+		| python3 -c "import sys, json; data = json.load(sys.stdin); quotas = data.get('quotas', []); l4 = [f\"  - {q['metric'].split('/')[-1]:<20} : {int(q['usage'])} utilisé(s) / {int(q['limit'])} autorisé(s)\" for q in quotas if 'NVIDIA_L4_GPUS' in q.get('metric', '') and 'PREEMPTIBLE' not in q.get('metric', '')]; print('\n'.join(l4) if l4 else '  Aucun quota trouvé.')"
+
+vllm-stop:
+	@echo ">>> Arrêt de la VM vLLM $(VLLM_VM)..."
+	@gcloud compute instances stop $(VLLM_VM) \
+		--project=$(PROJECT_ID) \
+		--zone=europe-west4-c \
+		--async
+
 vllm-status:
 	@echo ">>> Status de l'instance GCE :"
-	@gcloud compute instances describe $(VLLM_VM) --zone=europe-west4-c --project=$(PROJECT_ID) --format="value(status)"
-	@echo ">>> Status des conteneurs Docker (via SSH IAP) :"
-	@gcloud compute ssh $(VLLM_VM) --zone=europe-west4-c --project=$(PROJECT_ID) --tunnel-through-iap --command="docker ps"
+	@status=$$(gcloud compute instances describe $(VLLM_VM) --zone=europe-west4-c --project=$(PROJECT_ID) --format="value(status)"); \
+	echo "$$status"; \
+	if [ "$$status" = "RUNNING" ]; then \
+		echo ">>> Status des conteneurs Docker (via SSH IAP) :"; \
+		gcloud compute ssh $(VLLM_VM) --zone=europe-west4-c --project=$(PROJECT_ID) --tunnel-through-iap --command="docker ps"; \
+	else \
+		echo ">>> (VM éteinte : impossible d'interroger Docker via SSH)"; \
+	fi
 
 vllm-logs:
 	@gcloud compute ssh $(VLLM_VM) --zone=europe-west4-c --project=$(PROJECT_ID) --tunnel-through-iap --command="docker logs -f vllm"
