@@ -4,7 +4,7 @@ training:
   # KL penalty coefficient. 0.5 chosen after mode collapse observed at beta=0.1 (Run B):
   # model collapsed to predicting "deferred" for ~95% of examples (-25.5% accuracy vs SFT).
   # Stronger KL constraint keeps DPO closer to the SFT reference and prevents reward hacking.
-  beta: 0.5
+  beta: 0.3
   # Reduced from 5e-5 after reward hacking at higher LR — conservative adjustment on SFT base.
   learning_rate: 0.00002
   # Reduced from 2 — fewer epochs limit drift from SFT reference on small dataset (~900 pairs).

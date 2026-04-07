@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sys
 from pathlib import Path
@@ -216,6 +217,11 @@ Analyse les symptômes décrits et fournis :
 1. Le niveau d'urgence : URGENCE MAXIMALE / URGENCE MODÉRÉE / URGENCE DIFFÉRÉE
 2. Une évaluation clinique brève
 3. Des recommandations concrètes
+
+Règles absolues :
+- Réponds TOUJOURS en français, même si les symptômes sont décrits en anglais.
+- N'utilise jamais de marqueurs d'anonymisation comme <PERSON>, <LOCATION>, <DATE>, etc.
+- Si tu ne connais pas un nom propre, omets-le simplement.
 
 ⚠️ Cet agent est un outil d'aide au triage, pas un diagnostic médical."""
 
@@ -536,6 +542,76 @@ def format_dpo_response(response: str) -> str:
         Réponse avec ``<|im_end|>`` en suffixe (EOS du tour assistant en ChatML).
     """
     return f"{response}<|im_end|>"
+
+
+# ── Demo environment guard ───────────────────────────────────────────────────
+
+
+def check_demo_env() -> None:
+    """Validate required environment variables before running against the GCP MLflow backend.
+
+    Called at the start of each training/evaluation script. Detects demo mode
+    when ``MLFLOW_TRACKING_URI`` starts with ``https://`` (Cloud Run endpoint).
+
+    Checks:
+    - ``MLFLOW_TRACKING_URI``: must be set and start with ``https://``.
+    - ``MLFLOW_TRACKING_USERNAME``: must be set and non-empty (MLflow basic-auth username).
+    - ``MLFLOW_TRACKING_PASSWORD``: must be set and non-empty (MLflow basic-auth password).
+    - ``google-cloud-storage``: must be installed for GCS artifact storage.
+
+    Exits with a clear error message if a required variable is missing, so
+    the problem is caught immediately rather than after hours of training.
+
+    No-op when ``MLFLOW_TRACKING_URI`` is a local SQLite URI (dev mode).
+    """
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "")
+    if not tracking_uri.startswith("https://"):
+        return  # dev mode — no GCP auth required
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    username = os.environ.get("MLFLOW_TRACKING_USERNAME", "")
+    if not username:
+        errors.append(
+            "  • MLFLOW_TRACKING_USERNAME is not set.\n"
+            "    Add MLFLOW_TRACKING_USERNAME=admin to your .env.demo file."
+        )
+
+    password = os.environ.get("MLFLOW_TRACKING_PASSWORD", "")
+    if not password:
+        errors.append(
+            "  • MLFLOW_TRACKING_PASSWORD is not set.\n"
+            "    Add MLFLOW_TRACKING_PASSWORD=<password> to your .env.demo file."
+        )
+
+    # google-cloud-storage is required by MLflow to read/write artifacts on GCS.
+    # It is an optional MLflow dependency installed via: uv sync --extra gcp
+    try:
+        import importlib
+
+        importlib.import_module("google.cloud.storage")
+    except ImportError:
+        errors.append(
+            "  • google-cloud-storage is not installed.\n"
+            "    Run: uv sync --extra gcp\n"
+            "    Or via make: make train-sft ENV=demo  (setup-gcp runs automatically)"
+        )
+
+    if errors:
+        lines = "\n".join(errors)
+        print(
+            f"\n[check_demo_env] ✗ Missing required variables for demo (GCP) mode:\n{lines}\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if warnings:
+        lines = "\n".join(warnings)
+        print(
+            f"\n[check_demo_env] ⚠ Warnings for demo (GCP) mode:\n{lines}\n",
+            file=sys.stderr,
+        )
 
 
 # ── Checkpoint helpers (S2 — entraînement) ───────────────────────────────────

@@ -196,3 +196,7 @@ scripts/data_prep/__pycache__/
 unsloth_compiled_cache/
 # Evaluation reports
 reports/
+
+# Environment files
+.env.demo
+.env.mlflow
