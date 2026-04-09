@@ -10,7 +10,9 @@
 FROM vllm/vllm-openai:v0.4.2
 
 # Dépendances FastAPI — vLLM + transformers déjà présents dans l'image de base
-RUN pip install --no-cache-dir \
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+RUN uv pip install --system --no-cache-dir \
     "fastapi>=0.111" \
     "uvicorn[standard]>=0.29" \
     "pydantic-settings>=2.2" \

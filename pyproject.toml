@@ -29,6 +29,8 @@ dependencies = [
     "pyyaml>=6.0",
     "loguru>=0.7",
     "cupy-cuda12x>=14.0.1; sys_platform == 'linux'",
+    "fr-core-news-md",
+    "en-core-web-md",
 ]
 
 [project.optional-dependencies]
@@ -83,6 +85,10 @@ known-first-party = ["scripts"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.uv.sources]
+fr-core-news-md = { url = "https://github.com/explosion/spacy-models/releases/download/fr_core_news_md-3.8.0/fr_core_news_md-3.8.0.tar.gz" }
+en-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0.tar.gz" }
 
 [dependency-groups]
 dev = [

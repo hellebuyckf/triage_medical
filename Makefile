@@ -234,13 +234,13 @@ serve-restart:
 	docker compose down && docker compose up --build
 
 api-health:
-	curl -s http://localhost:8080/health | python3 -m json.tool
+	curl -s http://localhost:8080/health | $(PYTHON) -m json.tool
 
 api-triage:
 	curl -s -X POST http://localhost:8080/triage \
 	  -H "Content-Type: application/json" \
 	  -d '{"symptoms": "Douleur thoracique intense, sudation, nausées depuis 30 minutes."}' \
-	  | python3 -m json.tool
+	  | $(PYTHON) -m json.tool
 
 # Cibles GCP — interroge l'API déployée sur Cloud Run
 SYMPTOMS ?= "Douleur thoracique intense, sudation, nausées depuis 30 minutes."
@@ -251,27 +251,27 @@ gcp-url:
 gcp-health:
 	@url=$$(gcloud run services describe triage-api --region=europe-west1 --project=oc-p14 --format='value(status.url)'); \
 	echo "Interrogation de $$url/health..."; \
-	curl -s $$url/health | python3 -m json.tool
+	curl -s $$url/health | $(PYTHON) -m json.tool
 
 gcp-triage:
 	@url=$$(gcloud run services describe triage-api --region=europe-west1 --project=oc-p14 --format='value(status.url)'); \
 	curl -s -X POST $$url/triage \
 	  -H "Content-Type: application/json" \
 	  -d "{\"symptoms\": \"$(SYMPTOMS)\"}" \
-	  | python3 -m json.tool
+	  | $(PYTHON) -m json.tool
 
 gcp-triage-pretty:
 	@$(MAKE) -s gcp-triage | gemini --approval-mode plan -p "Tu es un assistant de visualisation de données médicales. Reçois le JSON suivant et transforme-le en un rapport Markdown élégant et lisible. Règles : 1. Titre H1 pour urgency_label en gras. 2. Supprime les balises <think>. 3. latency_ms en badge en bas. 4. Ligne de séparation avant disclaimer. 5. PAS de numéros de ligne. Format : Plain text Markdown." 2>/dev/null | glow
 
 # Cibles alpha — interroge le serveur directement via Tailscale (sans tunnel SSH)
 alpha-health:
-	curl -s http://$(ALPHA_HOST):8080/health | python3 -m json.tool
+	curl -s http://$(ALPHA_HOST):8080/health | $(PYTHON) -m json.tool
 
 alpha-triage:
 	curl -s -X POST http://$(ALPHA_HOST):8080/triage \
 	  -H "Content-Type: application/json" \
 	  -d '{"symptoms": "Douleur thoracique intense, sudation, nausées depuis 30 minutes."}' \
-	  | python3 -m json.tool
+	  | $(PYTHON) -m json.tool
 
 alpha-url:
 	@echo "API Triage CHSA (alpha) :"

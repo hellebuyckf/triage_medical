@@ -1015,6 +1015,12 @@ wheels = [
 ]
 
 [[package]]
+name = "en-core-web-md"
+version = "3.8.0"
+source = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0.tar.gz" }
+sdist = { hash = "sha256:504fe70715dca9464bf11e385fbe80e92ae127394df3f9c45242926082425551" }
+
+[[package]]
 name = "executing"
 version = "2.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1254,6 +1260,12 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f5/7a/e25245a30457595740041dba9d0ea8ec1b2517f2f1a6a741f15eba1a4edc/fonttools-4.62.0-cp313-cp313-win_amd64.whl", hash = "sha256:6826a5aa53fb6def8a66bf423939745f415546c4e92478a7c531b8b6282b6c3b", size = 2330291, upload-time = "2026-03-09T16:49:26.237Z" },
     { url = "https://files.pythonhosted.org/packages/9c/57/c2487c281dde03abb2dec244fd67059b8d118bd30a653cbf69e94084cb23/fonttools-4.62.0-py3-none-any.whl", hash = "sha256:75064f19a10c50c74b336aa5ebe7b1f89fd0fb5255807bfd4b0c6317098f4af3", size = 1152427, upload-time = "2026-03-09T16:50:04.074Z" },
 ]
+
+[[package]]
+name = "fr-core-news-md"
+version = "3.8.0"
+source = { url = "https://github.com/explosion/spacy-models/releases/download/fr_core_news_md-3.8.0/fr_core_news_md-3.8.0.tar.gz" }
+sdist = { hash = "sha256:0353cfe24a3d0ef8b2ac1b493a5955708e92fe9647b7ddcaee9da09cee8ad6a9" }
 
 [[package]]
 name = "frozenlist"
@@ -3548,6 +3560,8 @@ dependencies = [
     { name = "cupy-cuda12x", marker = "sys_platform == 'linux'" },
     { name = "datasets" },
     { name = "duckdb" },
+    { name = "en-core-web-md" },
+    { name = "fr-core-news-md" },
     { name = "huggingface-hub" },
     { name = "ipykernel" },
     { name = "jupyter-client" },
@@ -3600,7 +3614,9 @@ requires-dist = [
     { name = "cupy-cuda12x", marker = "sys_platform == 'linux'", specifier = ">=14.0.1" },
     { name = "datasets", specifier = ">=2.19" },
     { name = "duckdb", specifier = ">=1.5.0" },
+    { name = "en-core-web-md", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0.tar.gz" },
     { name = "fastapi", marker = "extra == 'serving'", specifier = ">=0.111" },
+    { name = "fr-core-news-md", url = "https://github.com/explosion/spacy-models/releases/download/fr_core_news_md-3.8.0/fr_core_news_md-3.8.0.tar.gz" },
     { name = "google-cloud-storage", marker = "extra == 'gcp'", specifier = ">=2.16" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "huggingface-hub", specifier = ">=0.23" },

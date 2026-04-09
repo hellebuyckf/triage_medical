@@ -1,6 +1,8 @@
 FROM python:3.11-slim
 
-RUN pip install --no-cache-dir \
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+RUN uv pip install --system --no-cache-dir \
     "mlflow[auth]>=2.13" \
     psycopg2-binary \
     google-cloud-storage
