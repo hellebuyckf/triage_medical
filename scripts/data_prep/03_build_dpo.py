@@ -8,8 +8,8 @@ This approach ensures DPO directly corrects the SFT model's urgency-classificati
 errors instead of learning stylistic preferences from misaligned academic text
 (UltraMedical-Preference was abandoned — see memory/project_dpo_strategy.md).
 
-Urgency swap table (safety-first: rejected = most dangerous downgrade):
-  max      → deferred   (most dangerous error: critical case sent home)
+Urgency swap table (safety-first: rejected = most common real confusion):
+  max      → moderate   (most frequent real confusion: 59 MAX→MOD vs 16 MAX→DEF)
   moderate → deferred   (common over-reassurance error)
   deferred → moderate   (most common SFT mistake for deferred)
 
@@ -49,10 +49,12 @@ DPO_TARGET_PAIRS = 500
 HARD_NEGATIVES_PATH = PROJECT_ROOT / "data" / "processed" / "dpo_hard_negatives"
 
 # Rejected urgency level for each correct level (safety-first policy).
-# Each label appears in rejected ~equally often; "différée" is heavily penalised
-# to prevent the model from using it as a safe default (v1 structural bug fix).
+# MAX → MODERATE: targets the dominant real confusion (59 MAX→MOD vs 16 MAX→DEF).
+# DIFFÉRÉE appears in rejected ~167 times (from moderate pairs only), same as MODERATE
+# (from deferred pairs), giving balanced penalisation and avoiding the v1 bias
+# where DIFFÉRÉE was over-penalised (~334×) and became a model blind spot.
 _URGENCY_SWAP: dict[str, str] = {
-    "max": "deferred",
+    "max": "moderate",
     "moderate": "deferred",
     "deferred": "moderate",
 }
@@ -245,6 +247,12 @@ def main() -> None:
     if HARD_NEGATIVES_PATH.exists():
         ds_hard = Dataset.load_from_disk(str(HARD_NEGATIVES_PATH))
         logger.info("Hard negatives loaded: {} pairs from {}.", len(ds_hard), HARD_NEGATIVES_PATH)
+        # Cap hard negatives to match synthetic count — prevents HN from dominating the
+        # training signal (1674 HN vs 495 synthetic = 77% HN caused max-collapse in Run C).
+        if len(ds_hard) > DPO_TARGET_PAIRS:
+            n_hn_before = len(ds_hard)
+            ds_hard = ds_hard.shuffle(seed=SEED).select(range(DPO_TARGET_PAIRS))
+            logger.info("Hard negatives capped at {} (was {}).", DPO_TARGET_PAIRS, n_hn_before)
         _log_label_distribution(ds_hard, "hard-neg", logger)
         ds_dpo = concatenate_datasets([ds_synthetic, ds_hard]).shuffle(seed=SEED)
         logger.info(
@@ -259,6 +267,18 @@ def main() -> None:
         )
         logger.info("Run 'make sft-errors' after SFT training to generate hard negatives.")
         ds_dpo = ds_synthetic.shuffle(seed=SEED)
+
+    # Deduplicate on the final merged dataset — synthetic dedup above only covers synthetic pairs;
+    # the same prompt can appear in both synthetic and hard negatives with conflicting chosen labels.
+    n_before = len(ds_dpo)
+    ds_dpo = deduplicate_on_prompt(ds_dpo, seed=SEED)
+    logger.info(
+        "Final deduplication: {} → {} pairs ({} removed).",
+        n_before,
+        len(ds_dpo),
+        n_before - len(ds_dpo),
+    )
+    _log_label_distribution(ds_dpo, "final", logger)
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     ds_dpo.save_to_disk(str(OUTPUT_PATH))

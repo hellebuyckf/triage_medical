@@ -15,6 +15,9 @@ PYTHON          = uv run python
 DATA_PREP       = scripts/data_prep
 TRAINING        = scripts/training
 
+# Model card — stocké dans infra/ (git-tracked), copié en README.md au moment du push HF
+README_MODEL    = infra/README_MODEL.md
+
 # Environnement cible : dev (défaut) ou demo
 # Usage : make train-sft ENV=demo   → logs vers MLflow GCP (Cloud Run)
 #         make train-sft            → logs vers MLflow local (SQLite)
@@ -22,11 +25,15 @@ TRAINING        = scripts/training
 ENV             ?= dev
 MLFLOW_TRACKING_URI := $(shell \
     grep '^MLFLOW_TRACKING_URI=' .env.$(ENV) 2>/dev/null | head -1 | cut -d'=' -f2-)
+MLFLOW_TRACKING_USERNAME := $(shell \
+    grep '^MLFLOW_TRACKING_USERNAME=' .env.$(ENV) 2>/dev/null | head -1 | cut -d'=' -f2-)
+MLFLOW_TRACKING_PASSWORD := $(shell \
+    grep '^MLFLOW_TRACKING_PASSWORD=' .env.$(ENV) 2>/dev/null | head -1 | cut -d'=' -f2-)
 
 # Variables d'env injectées dans les cibles d'entraînement.
-# demo : ajoute un Identity Token Google Cloud (expire après 1h, régénéré automatiquement).
+# demo : ajoute les credentials MLflow basic-auth depuis .env.demo.
 ifeq ($(ENV),demo)
-_MLFLOW_ENVVARS = MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)" MLFLOW_TRACKING_TOKEN="$$(gcloud auth print-identity-token)"
+_MLFLOW_ENVVARS = MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)" MLFLOW_TRACKING_USERNAME="$(MLFLOW_TRACKING_USERNAME)" MLFLOW_TRACKING_PASSWORD="$(MLFLOW_TRACKING_PASSWORD)" MLFLOW_TRACKING_TOKEN="$(shell gcloud auth print-identity-token 2>/dev/null)"
 # En mode demo, google-cloud-storage est requis pour les artefacts GCS.
 # setup-gcp est ajouté comme prérequis automatique des cibles d'entraînement/évaluation.
 _GCP_PREREQ     = setup-gcp
@@ -165,6 +172,8 @@ push-model: export-model
 		--push-to-hub \
 		--repo-id $(HF_USERNAME)/qwen3-triage-dpo \
 		--skip-verify
+	uv run huggingface-cli upload $(HF_USERNAME)/qwen3-triage-dpo \
+		$(README_MODEL) README.md
 
 upload-model:
 	@if [ -z "$(HF_USERNAME)" ]; then \
@@ -172,7 +181,9 @@ upload-model:
 		echo "Usage  : make upload-model HF_USERNAME=<votre_username>"; \
 		exit 1; \
 	fi
+	cp $(README_MODEL) checkpoints/dpo_merged/README.md
 	uv run huggingface-cli upload $(HF_USERNAME)/qwen3-triage-dpo ./checkpoints/dpo_merged/
+	rm -f checkpoints/dpo_merged/README.md
 
 # ── HuggingFace Hub ───────────────────────────────────────────────────────────
 

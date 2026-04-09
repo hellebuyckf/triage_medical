@@ -1,0 +1,28 @@
+training:
+  max_seq_length: 1024
+  # beta=0.3: reverts to dpo_v3 value that achieved accuracy=63.8% on 25 mars.
+  # beta=0.5 and beta=1.0 both caused mode collapse to "max" — higher KL constraint
+  # keeps the model close to an SFT reference that is itself biased toward "max",
+  # amplifying the bias instead of correcting it.
+  beta: 0.3
+  # Reduced from 1e-5 — more conservative update on ~1000 balanced pairs.
+  learning_rate: 0.000005
+  epochs: 1
+  batch_size: 1
+  grad_accum: 16
+  seed: 42
+
+lora:
+  # Reduced from 32 — lower rank limits reward-hacking capacity on small DPO dataset.
+  # r=16 with alpha=32 gives the same effective scaling ratio as r=32/alpha=64.
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - v_proj
+    - k_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj

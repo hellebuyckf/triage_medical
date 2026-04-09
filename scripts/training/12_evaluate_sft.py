@@ -54,10 +54,7 @@ N_EXAMPLES = 10
 BATCH_SIZE_EVAL = 8  # examples per GPU batch — reduce to 4 or 2 if CUDA OOM
 
 MLFLOW_EXPERIMENT = "sft-qwen3-1.7b-triage"
-MLFLOW_TRACKING_URI = os.getenv(
-    "MLFLOW_TRACKING_URI",
-    f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}",
-)
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI") or f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
 
 URGENCY_LABELS = ["max", "moderate", "deferred"]
 

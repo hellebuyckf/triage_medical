@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,10 +54,7 @@ TOKENIZED_DIR = PROJECT_ROOT / "data" / "processed" / "sft_tokenized"
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "sft"
 
 MLFLOW_EXPERIMENT = "sft-qwen3-1.7b-triage"
-MLFLOW_TRACKING_URI = os.getenv(
-    "MLFLOW_TRACKING_URI",
-    f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}",
-)
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI") or f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
 REGISTERED_MODEL_NAME = "sft-qwen3-1.7b-triage"
 
 
@@ -271,38 +267,6 @@ def log_model_info(model: PreTrainedModel, logger: Logger) -> None:
     )
 
 
-def refresh_mlflow_token(logger: Logger) -> None:
-    """Refresh the GCP OIDC identity token used to authenticate against MLflow on Cloud Run.
-
-    GCP identity tokens expire after 1 hour. SFT training typically exceeds this
-    limit, so the token must be refreshed before post-training MLflow calls
-    (log_model, end_run) to avoid 401 Unauthorized errors.
-
-    No-op when MLFLOW_TRACKING_URI is a local SQLite path (no token needed).
-
-    Args:
-        logger: Logger instance for status and warning messages.
-    """
-    if not MLFLOW_TRACKING_URI.startswith("https://"):
-        return
-    try:
-        result = subprocess.run(
-            ["gcloud", "auth", "print-identity-token"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        os.environ["MLFLOW_TRACKING_TOKEN"] = result.stdout.strip()
-        # Re-set the tracking URI so MLflow's internal REST store picks up the
-        # new token on the next get_host_creds() call.
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        logger.info("MLflow GCP identity token refreshed.")
-    except FileNotFoundError:
-        logger.warning("gcloud not found — cannot refresh MLflow token.")
-    except subprocess.CalledProcessError as exc:
-        logger.warning("gcloud auth print-identity-token failed: {}", exc.stderr.strip())
-
-
 def setup_mlflow() -> None:
     """Configure MLflow tracking URI et experiment."""
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -440,10 +404,6 @@ def main() -> None:
             json.dumps(training_config, indent=2), encoding="utf-8"
         )
         logger.info("Hyperparamètres sauvegardés dans {}/training_config.json", CHECKPOINT_DIR)
-
-        # Refresh the GCP identity token before log_model: training typically
-        # exceeds the 1-hour token TTL, which would cause a 401 on Cloud Run.
-        refresh_mlflow_token(logger)
 
         # Log the PEFT model natively — mlflow.transformers handles PeftModel
         # serialisation, tokenizer packaging, and Model Registry registration

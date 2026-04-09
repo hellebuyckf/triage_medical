@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
+import yaml
 
 if torch.cuda.is_available():
     torch.backends.cuda.preferred_blas_library("cublaslt")
@@ -49,6 +50,7 @@ load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 MODEL_NAME = os.getenv("MODEL_NAME", "unsloth/Qwen3-1.7B")
 SFT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "sft"
 DPO_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "dpo"
+DPO_CONFIG_PATH = PROJECT_ROOT / "configs" / "dpo.yaml"
 REPORTS_DIR = PROJECT_ROOT / "reports" / "dpo"
 
 SFT_FINAL_DIR = PROJECT_ROOT / "data" / "final" / "sft"
@@ -73,10 +75,7 @@ CLINICAL_THRESHOLDS: dict[str, float] = {
 }
 
 MLFLOW_EXPERIMENT = "dpo-qwen3-1.7b-triage"
-MLFLOW_TRACKING_URI = os.getenv(
-    "MLFLOW_TRACKING_URI",
-    f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}",
-)
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI") or f"sqlite:///{PROJECT_ROOT / 'mlflow.db'}"
 
 # Regex pour supprimer les artifacts de génération Qwen3 :
 # - ForCanBeConverted, 𫟦, caractères de remplacement Unicode (U+FFFD)
@@ -527,6 +526,7 @@ def generate_dpo_eval_report(
     sft_test_metrics: dict,
     dpo_test_metrics: dict,
     comparisons: list[dict],
+    dpo_config: dict | None = None,
 ) -> str:
     """Génère un rapport Markdown de comparaison SFT vs DPO.
 
@@ -536,6 +536,7 @@ def generate_dpo_eval_report(
         sft_test_metrics: Métriques SFT sur test set (toujours disponible).
         dpo_test_metrics: Métriques DPO sur test set (toujours disponible).
         comparisons: Comparaisons qualitatives SFT vs DPO.
+        dpo_config: Contenu brut du fichier configs/dpo.yaml, ou None si non disponible.
 
     Returns:
         Rapport complet en Markdown.
@@ -592,8 +593,36 @@ def generate_dpo_eval_report(
         f"**Checkpoint SFT** : {SFT_CHECKPOINT}\n"
         f"**Checkpoint DPO** : {DPO_CHECKPOINT}\n\n"
         "---\n\n"
-        "## 1. Métriques comparées — Val Set\n\n"
+        "## 0. Hyperparamètres DPO\n\n"
     )
+
+    if dpo_config is not None:
+        t = dpo_config.get("training", {})
+        lora = dpo_config.get("lora", {})
+        eff_batch = (
+            t.get("batch_size", "?") * t.get("grad_accum", "?")
+            if isinstance(t.get("batch_size"), int) and isinstance(t.get("grad_accum"), int)
+            else "?"
+        )
+        report += (
+            "| Paramètre | Valeur |\n"
+            "|---|---|\n"
+            f"| beta | {t.get('beta', 'N/A')} |\n"
+            f"| learning_rate | {t.get('learning_rate', 'N/A')} |\n"
+            f"| epochs | {t.get('epochs', 'N/A')} |\n"
+            f"| batch_size | {t.get('batch_size', 'N/A')} |\n"
+            f"| grad_accum | {t.get('grad_accum', 'N/A')} |\n"
+            f"| effective_batch | {eff_batch} |\n"
+            f"| max_seq_length | {t.get('max_seq_length', 'N/A')} |\n"
+            f"| seed | {t.get('seed', 'N/A')} |\n"
+            f"| lora_r | {lora.get('r', 'N/A')} |\n"
+            f"| lora_alpha | {lora.get('alpha', 'N/A')} |\n"
+            f"| lora_dropout | {lora.get('dropout', 'N/A')} |\n"
+        )
+    else:
+        report += "*Config non disponible (configs/dpo.yaml introuvable).*\n"
+
+    report += "\n---\n\n## 1. Métriques comparées — Val Set\n\n"
 
     # Val set section — table only when both sets of metrics are available
     if not has_val:
@@ -907,7 +936,13 @@ def main() -> None:
         )
 
         # ── Rapport ───────────────────────────────────────────────────────────
-        report = generate_dpo_eval_report(sft_val, dpo_val, sft_test, dpo_test, comparisons)
+        dpo_config: dict | None = None
+        if DPO_CONFIG_PATH.exists():
+            with DPO_CONFIG_PATH.open() as _f:
+                dpo_config = yaml.safe_load(_f)
+        report = generate_dpo_eval_report(
+            sft_val, dpo_val, sft_test, dpo_test, comparisons, dpo_config
+        )
         run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = REPORTS_DIR / f"eval_report_{run_timestamp}.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
