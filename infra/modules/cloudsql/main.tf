@@ -42,6 +42,7 @@ resource "google_sql_database_instance" "mlflow" {
   settings {
     tier = "db-f1-micro"
 
+    activation_policy = "ALWAYS"
     availability_type = "ZONAL"
 
     disk_type       = "PD_SSD"
@@ -73,6 +74,8 @@ resource "google_sql_database_instance" "mlflow" {
 resource "google_sql_database" "mlflow" {
   name     = var.db_name
   instance = google_sql_database_instance.mlflow.name
+
+  depends_on = [google_sql_database_instance.mlflow]
 }
 
 # ─────────────────────────────────────────────
@@ -83,4 +86,6 @@ resource "google_sql_user" "mlflow" {
   name     = var.db_user
   instance = google_sql_database_instance.mlflow.name
   password = var.db_password
+
+  depends_on = [google_sql_database_instance.mlflow]
 }
