@@ -12,7 +12,7 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from utils import SYSTEM_PROMPT, extract_urgency_from_response, get_logger
+from utils import SYSTEM_PROMPT, URGENCY_LABELS, extract_urgency_from_response, get_logger
 
 from serving.config import ServerConfig
 from serving.models import TriageRequest, TriageResponse
@@ -24,12 +24,6 @@ if TYPE_CHECKING:
 # ── Constantes ────────────────────────────────────────────────────────────────
 
 DISCLAIMER = "⚠️ Cet agent est un outil d'aide au triage, pas un diagnostic médical."
-
-URGENCY_LABELS: dict[str, str] = {
-    "max": "URGENCE MAXIMALE",
-    "moderate": "URGENCE MODÉRÉE",
-    "deferred": "URGENCE DIFFÉRÉE",
-}
 
 # Chat template ChatML standard pour Qwen3-Base (pas de template natif sur le modèle de base).
 # Même pattern que scripts/training/12_evaluate_sft.py:126-133.

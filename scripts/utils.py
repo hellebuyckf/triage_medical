@@ -164,7 +164,7 @@ def md5_hash(text: str) -> str:
 
 # ── Triage response formatting (S2 — SFT dataset) ────────────────────────────
 
-_URGENCY_LABELS: dict[str, str] = {
+URGENCY_LABELS: dict[str, str] = {
     "max": "URGENCE MAXIMALE",
     "moderate": "URGENCE MODÉRÉE",
     "deferred": "URGENCE DIFFÉRÉE",
@@ -201,7 +201,7 @@ def format_triage_response(urgency_level: str, source_response: str) -> str:
         >>> format_triage_response("max", "Chest pain can indicate a myocardial infarction.")
         'URGENCE MAXIMALE\\n\\nÉvaluation clinique : Chest pain can indicate...\\n\\nRecommandations : Appelez le 15...'
     """
-    label = _URGENCY_LABELS.get(urgency_level, _URGENCY_LABELS["moderate"])
+    label = URGENCY_LABELS.get(urgency_level, URGENCY_LABELS["moderate"])
     reco = _URGENCY_RECOMMENDATIONS.get(urgency_level, _URGENCY_RECOMMENDATIONS["moderate"])
 
     eval_text = source_response.strip()
