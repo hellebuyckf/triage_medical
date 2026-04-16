@@ -71,6 +71,24 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
+      - name: Ensure Cloud SQL instance is running
+        run: |
+          INSTANCE="mlflow-poc-db"
+          STATE=$(gcloud sql instances describe "$INSTANCE" --format='value(state)' 2>/dev/null || echo "UNKNOWN")
+          if [ "$STATE" != "RUNNABLE" ]; then
+            echo "Instance is '$STATE', starting it..."
+            gcloud sql instances patch "$INSTANCE" --activation-policy=ALWAYS --quiet
+            for i in $(seq 1 30); do
+              STATE=$(gcloud sql instances describe "$INSTANCE" --format='value(state)')
+              echo "Attempt $i/30 — state: $STATE"
+              [ "$STATE" = "RUNNABLE" ] && break
+              sleep 10
+            done
+          fi
+          echo "Final instance state: $STATE"
+          [ "$STATE" = "RUNNABLE" ] || { echo "Instance failed to start"; exit 1; }
+        working-directory: .
+
       - name: Terraform Plan
         run: |
           terraform plan \
