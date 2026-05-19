@@ -15,7 +15,9 @@ The agent fine-tunes **Qwen3-1.7B-Base** to classify medical emergencies (`max` 
 project14/
 ├── CLAUDE.md                         # Project-specific AI assistant instructions
 ├── pyproject.toml                    # Dependencies (uv)
-├── Makefile                          # Pipeline orchestration
+├── Makefile                          # Pipeline orchestration (training + local serving)
+├── Dockerfile                        # Image FastAPI serving (Cloud Run prod)
+├── docker-compose.yml                # Local dev stack
 ├── configs/
 │   ├── datasets.yaml                 # HuggingFace dataset IDs and configs
 │   ├── sft.yaml                      # SFT hyperparameters (LoRA, training)
@@ -24,6 +26,8 @@ project14/
 │   ├── raw/                          # Git-ignored — raw HuggingFace datasets
 │   ├── processed/                    # Git-ignored — intermediate files
 │   └── final/                        # Deliverable — final Parquet files
+├── docker/
+│   └── mlflow/                       # Dockerfile MLflow (Cloud Run)
 ├── scripts/
 │   ├── utils.py                      # Shared module (logger, urgency inference, validators)
 │   ├── data_prep/
@@ -34,13 +38,26 @@ project14/
 │   │   ├── 04_anonymize.py           # Step 4: GDPR anonymization (Presidio)
 │   │   ├── 05_split_and_validate.py  # Step 5: Train/val/test split + validation
 │   │   └── 06_push_to_hub.py         # Step 6: Push datasets to HuggingFace Hub
-│   └── training/
-│       ├── 10_prepare_tokenizer.py   # Tokenize + format ChatML, save Arrow datasets
-│       ├── 11_train_sft.py           # SFT LoRA training (Unsloth + TRL SFTTrainer)
-│       ├── 12_evaluate_sft.py        # SFT evaluation — accuracy / F1 / eval report
-│       ├── 20_train_dpo.py           # DPO alignment (TRL DPOTrainer, ref_model=None)
-│       ├── 21_evaluate_dpo.py        # DPO evaluation — SFT vs DPO comparison
-│       └── 22_export_model.py        # Merge SFT+DPO LoRA → dense HuggingFace model
+│   ├── training/
+│   │   ├── 10_prepare_tokenizer.py   # Tokenize + format ChatML, save Arrow datasets
+│   │   ├── 11_train_sft.py           # SFT LoRA training (Unsloth + TRL SFTTrainer)
+│   │   ├── 12_evaluate_sft.py        # SFT evaluation — accuracy / F1 / eval report
+│   │   ├── 20_train_dpo.py           # DPO alignment (TRL DPOTrainer, ref_model=None)
+│   │   ├── 21_evaluate_dpo.py        # DPO evaluation — SFT vs DPO comparison
+│   │   └── 22_export_model.py        # Merge SFT+DPO LoRA → dense HuggingFace model
+│   └── serving/
+│       └── app.py                    # FastAPI app exposant /triage (vLLM backend)
+├── infra/                            # Infrastructure as Code (Terraform + GCP)
+│   ├── main.tf                       # Ressources racine + appel des modules
+│   ├── variables.tf                  # Variables d'entrée
+│   ├── outputs.tf                    # Outputs (URLs, IPs, etc.)
+│   ├── Makefile                      # Cibles opérationnelles GCP (start/stop/deploy/logs)
+│   ├── terraform.tfvars.example      # Template de configuration
+│   └── modules/
+│       ├── cloudsql/                 # Cloud SQL PostgreSQL (backend MLflow)
+│       ├── cloudrun/                 # Cloud Run MLflow + Artifact Registry + VPC Connector
+│       ├── cloudrun_api/             # Cloud Run FastAPI (gateway triage)
+│       └── vllm_gce/                 # Compute Engine GPU L4 (inférence vLLM)
 ├── checkpoints/                      # Git-ignored — LoRA adapters and merged model
 │   ├── sft/
 │   ├── dpo/
@@ -48,7 +65,9 @@ project14/
 ├── reports/
 │   ├── sft/                          # Timestamped SFT eval reports (immune to make clean-sft)
 │   └── dpo/                          # Timestamped DPO eval reports (immune to make clean-dpo)
-└── specs/                            # Project specifications (private submodule)
+└── .github/workflows/
+    ├── ci.yml                        # CI: lint + type + tests + terraform plan
+    └── cd.yml                        # CD: build image → push AR → terraform apply
 ```
 
 ---
@@ -64,10 +83,12 @@ project14/
 | Alignment | DPO via TRL |
 | GDPR Anonymization | Presidio + spaCy (`fr_core_news_md`, `en_core_web_md`) |
 | Data Format | Parquet (pyarrow) |
-| Experiment Tracking | MLflow / Weights & Biases |
-| Serving | vLLM + FastAPI |
-| Containerization | Docker |
-| CI/CD | GitHub Actions |
+| Experiment Tracking | MLflow (Cloud Run + Cloud SQL + GCS) |
+| Serving | vLLM (GCE GPU) + FastAPI (Cloud Run) |
+| Containerization | Docker + Artifact Registry |
+| Infrastructure | Terraform (IaC) |
+| Cloud | GCP — Cloud Run, Cloud SQL, Compute Engine (L4 GPU), GCS, VPC |
+| CI/CD | GitHub Actions + Workload Identity Federation |
 
 ---
 
@@ -192,6 +213,44 @@ curl -X POST http://localhost:8080/triage \
 ```bash
 uv run pytest tests/test_serving.py -v
 ```
+
+### Serving — Déploiement Cloud (GCP)
+
+L'architecture de production tourne entièrement sur GCP et est gérée par Terraform.
+Voir [`infra/README.md`](infra/README.md) pour le guide complet.
+
+```
+FastAPI (Cloud Run)          → gateway publique — reçoit les requêtes /triage
+    └── vLLM (GCE GPU L4)   → inférence du modèle (europe-west4-c)
+MLflow (Cloud Run)           → experiment tracking
+    ├── Cloud SQL PostgreSQL → backend runs/métriques
+    └── GCS Bucket           → artefacts (modèles, checkpoints)
+```
+
+```bash
+# Depuis infra/
+
+# Démarrer tous les services GCP (après arrêt économique)
+make -C infra start
+
+# Déployer l'API (build image → push Artifact Registry → terraform apply)
+make -C infra prod-deploy
+
+# Voir l'état de tous les services
+make -C infra list
+
+# Arrêter (économie — suspend Cloud SQL + arrête VM GPU + met Cloud Run à 0)
+make -C infra stop
+```
+
+#### CI/CD (GitHub Actions)
+
+| Workflow | Déclencheur | Actions |
+|---|---|---|
+| `ci.yml` | Push + PR → `main` | Ruff lint/format, Pyright, pytest, `terraform fmt` + `validate` + `plan` |
+| `cd.yml` | Push → `main` (fichiers `infra/` ou `scripts/serving/`) | Build image Docker → push Artifact Registry → `terraform apply` |
+
+L'authentification GCP utilise **Workload Identity Federation** (sans clé de service account).
 
 ### Training config (YAML)
 
@@ -345,7 +404,7 @@ lora:
 | **S1** | `data/final/` — 5 Parquet files + `rgpd_report.md` + `stats_report.md` | ✅ Done |
 | **S2** | SFT checkpoint (`checkpoints/sft/`) + MLflow run + `reports/sft/eval_report_*.md` | ✅ Done |
 | **S3** | DPO checkpoint + merged model (`checkpoints/dpo_merged/`) + `reports/dpo/eval_report_*.md` | ✅ Done |
-| **S4** | Cloud `/triage` endpoint + CI/CD pipeline + technical report (≤ 20 pages) | ⏳ Upcoming |
+| **S4** | Cloud `/triage` endpoint + CI/CD pipeline + technical report (≤ 20 pages) | ✅ Done |
 
 ---
 
