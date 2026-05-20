@@ -79,7 +79,7 @@ Le succès du POC repose sur l'intégration de frameworks spécialisés :
     *   **Inférence (GCE + vLLM)** : VM avec **GPU NVIDIA L4** (24 Go VRAM).
     *   **Tracking (MLflow + Cloud SQL)** : Suivi centralisé des métriques.
 *   **Schéma d'Architecture** :
-    ![Architecture du Projet](./diagramme/fossflow-export-2026-04-15T14_42_44.995Z.png)
+    ![Architecture du Projet](./diagramme/fossflow-export-2026-04-16T07_30_44.116Z.png)
 
 ---
 
